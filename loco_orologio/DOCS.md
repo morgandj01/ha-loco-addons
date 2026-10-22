@@ -7,9 +7,9 @@ segmenti i timer che gli manda LOCO. Il protocollo l'ha studiato Mike Janofsky
 
 Ascolta sulla porta `porta` (8483) e risponde **solo** agli indirizzi in `da` (separati da virgole) e a questa macchina.
 
-- `POST /orologio` `{"stanza", "timer": [{"id", "fine" (ms), "pausa"?, "suona"?}], "sveglia"}`: cosa far vedere
+- `POST /orologio` `{"stanza", "timer": [{"id", "fine" (ms), "pausa"?, "suona"?}], "sveglia", "avviso" (ms)}`: cosa far vedere (un `avviso` nuovo = luce gialla al centro, 4 pulsazioni)
 - `GET /orologio`: come sta
-- `POST /comando` `{"cosa": "stato" | "abbina" | "calibra" | "correggi" | "ora" | "prova" | "squilla" | "rifasa" | "dimentica", ...}`
+- `POST /comando` `{"cosa": "stato" | "abbina" | "calibra" | "correggi" | "ora" | "prova" | "squilla" | "avvisa" | "rifasa" | "dimentica", ...}`
 
 `gettone`: se c'è, `/comando` vuole l'intestazione `X-Loco-Gettone`. `fuso`: il fuso orario dell'ora sulle lancette (Europe/Rome). `scheda`: l'adattatore Bluetooth (es. `hci1`); vuoto
 = il primo che si accende.

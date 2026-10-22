@@ -55,6 +55,7 @@ SQUILLO_S = 12.0                       # ogni quanto si ripete «active» mentre
 SQUILLO_MAX_S = 120.0
 RIFASA = (3, 30)                       # di notte, quando non guarda nessuno
 CALIBRA_S = 600.0
+AVVISO_S = 90.0                        # un avviso più vecchio di così non accende più il giallo
 
 # --- il protocollo (dalla descrizione di PROTOCOL.md, scritto qui) ------------------------------------------------
 STX, ETX, ESC = 0xF0, 0xF1, 0xF2
@@ -176,7 +177,9 @@ def voluto_valido(d) -> dict | None:
         if isinstance(f, bool) or not isinstance(f, (int, float)) or not 0 < f < 10**14:
             return None
         out.append({"id": t["id"], "fine": int(f), "pausa": t.get("pausa") is True, "suona": t.get("suona") is True})
-    return {"timer": out, "sveglia": d.get("sveglia") is True}
+    a = d.get("avviso", 0)
+    a = int(a) if isinstance(a, (int, float)) and not isinstance(a, bool) and 0 < a < 10**14 else 0
+    return {"timer": out, "sveglia": d.get("sveglia") is True, "avviso": a}
 
 
 # --- quello che l'orologio deve vedere, e cosa mandargli -------------------------------------------------------
@@ -193,6 +196,7 @@ class Regista:
         self.sveglia_da = 0.0
         self.sveglia_ultimo = 0.0
         self.prova: dict | None = None          # un timer di prova dal comando
+        self.avviso_visto = 0                    # l'ultimo avviso di LOCO (ms) già fatto vedere col giallo
 
     def ricollegato(self) -> None:
         self.mandati.clear()
@@ -237,6 +241,13 @@ class Regista:
         elif self.sveglia_da:
             out.append(("sveglia fermata", stato(alarms="cleared")))
             self.sveglia_da = self.sveglia_ultimo = 0.0
+        # un avviso di LOCO nella stanza (22 ottobre, Morgan «usiamo il giallo per gli avvisi»): la luce al centro
+        # pulsa gialla 4 volte e si spegne da sola; uno vecchio (riavvio, ricollegamento) non si rifà
+        a = int(self.voluto.get("avviso") or 0)
+        if a > self.avviso_visto:
+            self.avviso_visto = a
+            if adesso - a / 1000 < AVVISO_S:
+                out.append(("avviso: luce gialla", accendi_spia()))
         return out
 
 
@@ -605,10 +616,13 @@ class Orologio:
             self.regista.prova = {"id": "prova", "fine": int((time.time() + m * 60) * 1000), "pausa": False,
                                   "suona": False}
             return {"ok": True, "detto": f"timer di prova di {m:g} minuti"}
+        if cosa == "avvisa":
+            self.manda("prova avviso: luce gialla", accendi_spia())
+            return {"ok": True, "detto": "luce gialla al centro"}
         if cosa == "squilla":
             self.manda("prova squillo", stato(timers="active"))
             return {"ok": True}
-        return {"ok": False, "detto": "comandi: stato abbina dimentica calibra correggi ora rifasa prova squilla"}
+        return {"ok": False, "detto": "comandi: stato abbina dimentica calibra correggi ora rifasa prova squilla avvisa"}
 
     def _abbina(self) -> None:
         self.abbina_fino = time.time() + 90
