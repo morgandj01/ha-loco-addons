@@ -415,7 +415,8 @@ class Orologio:
                 om = dbus.Interface(self.bus.get_object("org.bluez", "/"), "org.freedesktop.DBus.ObjectManager")
                 for path, ifs in om.GetManagedObjects().items():
                     d = ifs.get("org.bluez.Device1")
-                    if d and NOMI.match(str(d.get("Name", ""))):
+                    # solo se sentito adesso (RSSI): uno rimasto in memoria da prima non è in abbinamento
+                    if d and NOMI.match(str(d.get("Name", ""))) and "RSSI" in d:
                         return str(d.get("Address"))
                 time.sleep(1)
         finally:
@@ -568,6 +569,8 @@ class Orologio:
                                          "davanti pulsa arancione"}
         if cosa == "dimentica":
             self.stacca("dimenticato")
+            if self.cfg.get("indirizzo"):
+                self._rimuovi(self.cfg["indirizzo"])
             self.cfg.pop("indirizzo", None)
             self._salva()
             return {"ok": True}
@@ -617,6 +620,8 @@ class Orologio:
                 return
             self.scrivi(f"trovato {ind}: mi abbino e mi collego subito, come un Echo")
             self.stacca("abbinamento")
+            self._rimuovi(ind)                            # una chiave vecchia (orologio resettato) = errore 52
+
             self.cfg["indirizzo"] = ind
             self._salva()
             for _ in range(6):                            # il primo tentativo dopo l'abbinamento spesso torna indietro
@@ -628,6 +633,17 @@ class Orologio:
         finally:
             self.abbina_fino = 0.0
             self._scheda("Pairable", False)
+
+    def _rimuovi(self, ind: str) -> None:
+        """Toglie l'orologio e la sua chiave dal Bluetooth (BlueZ): dopo un reset dell'orologio la chiave vecchia non
+        combacia più e ogni collegamento finisce con «chiave mancante» (errno 52)"""
+        import dbus
+        try:
+            dbus.Interface(self.bus.get_object("org.bluez", self.scheda), "org.bluez.Adapter1").RemoveDevice(
+                self.scheda + "/dev_" + ind.replace(":", "_"))
+            self.scrivi(f"tolta la chiave vecchia di {ind}")
+        except Exception:  # noqa: BLE001
+            pass                                           # non c'era
 
     def _fidato(self, ind: str) -> None:
         import dbus
