@@ -1,0 +1,23 @@
+name: LOCO orologio
+version: "1.0.0"
+slug: loco_orologio
+description: Fa da Echo all'Echo Wall Clock in Bluetooth classico (ora, calibrazione, timer di LOCO)
+url: https://github.com/morgandj01/ha-loco-addons
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: application
+boot: auto
+host_network: true
+host_dbus: true
+options:
+  da: "192.168.10.193"
+  porta: 8483
+  gettone: ""
+  scheda: ""
+schema:
+  da: str
+  porta: port
+  gettone: password?
+  scheda: str?
