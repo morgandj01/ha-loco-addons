@@ -8,6 +8,9 @@ export OROLOGIO_PORTA="$(opz porta)"
 export OROLOGIO_STATO=/data/stato.json
 export OROLOGIO_GETTONE=/data/gettone
 export OROLOGIO_SCHEDA="$(opz scheda)"
+# l'ora dell'orologio è quella locale: HA non passa il fuso al contenitore (1.0.0 mandava l'ora UTC)
+FUSO="$(opz fuso)"
+if [ -n "$FUSO" ] && [ -f "/usr/share/zoneinfo/$FUSO" ]; then export TZ="$FUSO"; else export TZ=Europe/Rome; fi
 umask 077
 opz gettone > /data/gettone
 [ -n "$OROLOGIO_SCHEDA" ] || unset OROLOGIO_SCHEDA

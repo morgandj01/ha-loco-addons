@@ -11,7 +11,7 @@ Ascolta sulla porta `porta` (8483) e risponde **solo** agli indirizzi in `da` (s
 - `GET /orologio`: come sta
 - `POST /comando` `{"cosa": "stato" | "abbina" | "calibra" | "correggi" | "ora" | "prova" | "squilla" | "rifasa" | "dimentica", ...}`
 
-`gettone`: se c'è, `/comando` vuole l'intestazione `X-Loco-Gettone`. `scheda`: l'adattatore Bluetooth (es. `hci1`); vuoto
+`gettone`: se c'è, `/comando` vuole l'intestazione `X-Loco-Gettone`. `fuso`: il fuso orario dell'ora sulle lancette (Europe/Rome). `scheda`: l'adattatore Bluetooth (es. `hci1`); vuoto
 = il primo che si accende.
 
 **Abbinare**: tasto blu dietro l'orologio finché la luce davanti pulsa arancione, poi `{"cosa": "abbina"}`. Accetta
