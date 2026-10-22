@@ -1,5 +1,5 @@
 name: LOCO orologio
-version: "1.0.1"
+version: "1.0.2"
 slug: loco_orologio
 description: Fa da Echo all'Echo Wall Clock in Bluetooth classico (ora, calibrazione, timer di LOCO)
 url: https://github.com/morgandj01/ha-loco-addons

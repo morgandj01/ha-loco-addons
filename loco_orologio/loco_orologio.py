@@ -329,6 +329,7 @@ class Orologio:
                     os.close(fd.take())
                 except Exception:  # noqa: BLE001
                     pass
+                me.richiamato(str(dev))
 
             @dbus.service.method("org.bluez.Profile1", in_signature="o", out_signature="")
             def RequestDisconnection(self, _dev):  # noqa: N802
@@ -438,6 +439,8 @@ class Orologio:
             s.connect((ind, CANALE))
         except OSError as e:
             s.close()
+            if self.errore != f"collegamento: {e}":
+                self.scrivi(f"non mi collego: {e}")
             self.errore = f"collegamento: {e}"
             return False
         s.settimeout(0.3)
@@ -449,6 +452,15 @@ class Orologio:
         self.scrivi(f"collegato a {ind}")
         self.manda("scopri", scopri())
         return True
+
+    def richiamato(self, dev: str) -> None:
+        """L'orologio ci richiama (luce blu al centro): il collegamento di prima è morto anche se il socket non lo sa,
+        e lui aspetta ~20 s che apriamo il suo canale 4 (PROTOCOL.md §2). Si riapre subito"""
+        if self.cfg.get("indirizzo", "").replace(":", "_") not in dev:
+            return
+        self.scrivi("l'orologio richiama: mi ricollego")
+        self.stacca("richiamato")
+        self.attesa, self.tentativi = 0.0, 0
 
     def stacca(self, perche: str) -> None:
         with self.lock:
