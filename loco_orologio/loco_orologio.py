@@ -682,7 +682,9 @@ class Orologio:
 # aiutanti di HA ogni 2 secondi (input_button premuto = comando, input_number e input_boolean = come deve stare) e
 # scrive sensor.orologio_cucina_stato. Timer, sveglie e avvisi restano a LOCO da pc-01 (POST /orologio)
 HA_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
-HA_API = os.environ.get("OROLOGIO_HA_API", "http://supervisor/core/api")
+HA_API = os.environ.get("OROLOGIO_HA_API", "")
+# con host_network il nome «supervisor» a volte non si risolve: si prova anche l'indirizzo fisso della rete di HA
+HA_API_PROVE = [HA_API] if HA_API else ["http://supervisor/core/api", "http://172.30.32.2/core/api"]
 SOLO_HA = bool(HA_TOKEN)
 SOLO_DA_HA = ("abbina", "dimentica", "calibra", "correggi", "ora", "rifasa")
 PULSANTI = {"input_button.orologio_cucina_abbina": {"cosa": "abbina"},
@@ -699,9 +701,33 @@ class ComandiHA:
         self.o = o
         self.visti: dict[str, str] = {}
         self.mandato = ""
+        self.api = HA_API_PROVE[0]
+        self.errore = ""
 
     def _api(self, metodo: str, pezzo: str, dati: dict | None = None):
-        r = _rq.Request(f"{HA_API}/{pezzo}", method=metodo, data=json.dumps(dati).encode() if dati is not None else None,
+        ultimo = None
+        for base in [self.api] + [b for b in HA_API_PROVE if b != self.api]:
+            try:
+                out = self._api_da(base, metodo, pezzo, dati)
+                if base != self.api:
+                    self.o.scrivi(f"HA da {base}")
+                self.api = base
+                if self.errore:
+                    self.o.scrivi("HA di nuovo raggiungibile")
+                    self.errore = ""
+                return out
+            except _rq.HTTPError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                ultimo = e
+        e = f"{type(ultimo).__name__}: {ultimo}"
+        if e != self.errore:
+            self.o.scrivi(f"HA non risponde: {e}")
+            self.errore = e
+        raise ultimo
+
+    def _api_da(self, base: str, metodo: str, pezzo: str, dati: dict | None):
+        r = _rq.Request(f"{base}/{pezzo}", method=metodo, data=json.dumps(dati).encode() if dati is not None else None,
                         headers={"Authorization": f"Bearer {HA_TOKEN}", "Content-Type": "application/json"})
         with _rq.urlopen(r, timeout=8) as x:
             return json.loads(x.read() or b"null")
@@ -880,7 +906,10 @@ def main() -> int:
     o.avvia_dbus()
     threading.Thread(target=o.giro, daemon=True).start()
     if SOLO_HA:
+        o.scrivi("ora, abbinamento e calibrazione dai pulsanti di HA (orologio_cucina_*)")
         threading.Thread(target=ComandiHA(o).giro, daemon=True).start()
+    else:
+        o.scrivi("niente SUPERVISOR_TOKEN: i pulsanti di HA non li leggo")
     o.scrivi(f"in ascolto su {ASCOLTO}:{PORTA}{' solo da ' + ','.join(sorted(DA)) if DA else ''}, orologio {o.cfg.get('indirizzo') or 'non ancora abbinato'}")
     from gi.repository import GLib
     try:
