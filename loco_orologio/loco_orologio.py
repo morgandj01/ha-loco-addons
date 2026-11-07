@@ -757,14 +757,15 @@ class ComandiHA:
         st = self._stato(CORREZIONE)
         if st:
             try:
-                m = round(float(st.get("state")))
+                m = round(float(st.get("state")) * 2) / 2
             except (TypeError, ValueError):
                 m = None
-            if m is not None and m != round(self.o.regista.correzione) and primo:
+            corr = round(self.o.regista.correzione * 2) / 2
+            if m is not None and m != corr and primo:
                 self._servizio("input_number/set_value", {"entity_id": CORREZIONE,      # all'inizio vale l'orologio
-                                                          "value": round(self.o.regista.correzione)})
-            elif m is not None and m != round(self.o.regista.correzione):
-                self.o.scrivi(f"da HA: correzione {m:+d} minuti")
+                                                          "value": corr})
+            elif m is not None and m != corr:
+                self.o.scrivi(f"da HA: correzione {m:+g} minuti")
                 self.o.comando({"cosa": "correggi", "minuti": m}, da_ha=True)
         st = self._stato(RIFASA_HA)
         if st and st.get("state") in ("on", "off"):
