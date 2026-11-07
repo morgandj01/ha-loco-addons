@@ -11,6 +11,10 @@ export OROLOGIO_SCHEDA="$(opz scheda)"
 # l'ora dell'orologio è quella locale: HA non passa il fuso al contenitore (1.0.0 mandava l'ora UTC)
 FUSO="$(opz fuso)"
 if [ -n "$FUSO" ] && [ -f "/usr/share/zoneinfo/$FUSO" ]; then export TZ="$FUSO"; else export TZ=Europe/Rome; fi
+# s6-overlay v3 non passa l'ambiente del contenitore al CMD: il gettone di HA (homeassistant_api) sta qui
+if [ -z "${SUPERVISOR_TOKEN:-}" ] && [ -r /run/s6/container_environment/SUPERVISOR_TOKEN ]; then
+  SUPERVISOR_TOKEN="$(cat /run/s6/container_environment/SUPERVISOR_TOKEN)"; export SUPERVISOR_TOKEN
+fi
 umask 077
 opz gettone > /data/gettone
 [ -n "$OROLOGIO_SCHEDA" ] || unset OROLOGIO_SCHEDA
