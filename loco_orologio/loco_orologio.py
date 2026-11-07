@@ -40,6 +40,7 @@ import time
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib import request as _rq
 
 PORTA = int(os.environ.get("OROLOGIO_PORTA", "8483"))
 ORIGINE = os.environ.get("OROLOGIO_ORIGINE", "https://192.168.10.193:8470")
@@ -570,10 +571,12 @@ class Orologio:
             self.calibra_fino = adesso + 150
 
     # comandi
-    def comando(self, d: dict) -> dict:
+    def comando(self, d: dict, da_ha: bool = False) -> dict:
         cosa = str(d.get("cosa") or "")
         if cosa == "stato":
             return self.stato()
+        if SOLO_HA and not da_ha and cosa in SOLO_DA_HA:
+            return {"ok": False, "detto": "ora, abbinamento e calibrazione si fanno dai pulsanti dell'orologio in HA"}
         if cosa == "abbina":
             threading.Thread(target=self._abbina, daemon=True).start()
             return {"ok": True, "detto": "cerco l'orologio per 60 s: tieni premuto il tasto dietro finché la luce "
@@ -674,6 +677,115 @@ class Orologio:
                 "sveglia": self.regista.voluto["sveglia"], "errore": self.errore, "registro": self.registro[-12:]}
 
 
+# --- i comandi da Home Assistant (add-on con homeassistant_api, 7 novembre) ----------------------------------------------
+# Morgan: «per il controllo dell'ora, abbinamento e calibrazione usiamo solo Home Assistant». L'add-on legge i suoi
+# aiutanti di HA ogni 2 secondi (input_button premuto = comando, input_number e input_boolean = come deve stare) e
+# scrive sensor.orologio_cucina_stato. Timer, sveglie e avvisi restano a LOCO da pc-01 (POST /orologio)
+HA_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
+HA_API = os.environ.get("OROLOGIO_HA_API", "http://supervisor/core/api")
+SOLO_HA = bool(HA_TOKEN)
+SOLO_DA_HA = ("abbina", "dimentica", "calibra", "correggi", "ora", "rifasa")
+PULSANTI = {"input_button.orologio_cucina_abbina": {"cosa": "abbina"},
+            "input_button.orologio_cucina_calibra": {"cosa": "calibra", "minuti": 10},
+            "input_button.orologio_cucina_rimanda_l_ora": {"cosa": "ora"},
+            "input_button.orologio_cucina_dimentica": {"cosa": "dimentica"}}
+CORREZIONE = "input_number.orologio_cucina_correzione"
+RIFASA_HA = "input_boolean.orologio_cucina_rifasatura_notte"
+SENSORE = "sensor.orologio_cucina_stato"
+
+
+class ComandiHA:
+    def __init__(self, o: "Orologio"):
+        self.o = o
+        self.visti: dict[str, str] = {}
+        self.mandato = ""
+
+    def _api(self, metodo: str, pezzo: str, dati: dict | None = None):
+        r = _rq.Request(f"{HA_API}/{pezzo}", method=metodo, data=json.dumps(dati).encode() if dati is not None else None,
+                        headers={"Authorization": f"Bearer {HA_TOKEN}", "Content-Type": "application/json"})
+        with _rq.urlopen(r, timeout=8) as x:
+            return json.loads(x.read() or b"null")
+
+    def _servizio(self, nome: str, dati: dict) -> None:
+        try:
+            self._api("POST", f"services/{nome}", dati)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _stato(self, eid: str) -> dict | None:
+        try:
+            return self._api("GET", f"states/{eid}")
+        except Exception:  # noqa: BLE001
+            return None
+
+    def giro_uno(self, primo: bool) -> None:
+        for eid, cmd in PULSANTI.items():
+            st = self._stato(eid)
+            if not st:
+                continue
+            v = str(st.get("state"))
+            if not primo and eid in self.visti and v != self.visti[eid] and v not in ("unknown", "unavailable"):
+                self.o.scrivi(f"da HA: {cmd['cosa']}")
+                self.o.comando(dict(cmd), da_ha=True)
+            self.visti[eid] = v
+        st = self._stato(CORREZIONE)
+        if st:
+            try:
+                m = round(float(st.get("state")))
+            except (TypeError, ValueError):
+                m = None
+            if m is not None and m != round(self.o.regista.correzione) and primo:
+                self._servizio("input_number/set_value", {"entity_id": CORREZIONE,      # all'inizio vale l'orologio
+                                                          "value": round(self.o.regista.correzione)})
+            elif m is not None and m != round(self.o.regista.correzione):
+                self.o.scrivi(f"da HA: correzione {m:+d} minuti")
+                self.o.comando({"cosa": "correggi", "minuti": m}, da_ha=True)
+        st = self._stato(RIFASA_HA)
+        if st and st.get("state") in ("on", "off"):
+            vuole = st["state"] == "on"
+            if vuole != bool(self.o.cfg.get("rifasa", True)) and primo:
+                self._servizio("input_boolean/turn_" + ("on" if self.o.cfg.get("rifasa", True) else "off"),
+                               {"entity_id": RIFASA_HA})
+            elif vuole != bool(self.o.cfg.get("rifasa", True)):
+                self.o.comando({"cosa": "rifasa", "acceso": vuole}, da_ha=True)
+
+    def scrivi_stato(self) -> None:
+        o = self.o
+        if o.abbina_fino > time.time():
+            stato = "in abbinamento"
+        elif not o.cfg.get("indirizzo"):
+            stato = "da abbinare"
+        elif o.sock is None:
+            stato = "staccato"
+        elif o.calibra_fino > time.time():
+            stato = "in calibrazione"
+        else:
+            stato = "collegato"
+        attr = {"friendly_name": "Orologio cucina", "icon": "mdi:clock-outline",
+                "indirizzo": o.cfg.get("indirizzo") or "", "errore": o.errore or "",
+                "correzione_min": o.regista.correzione, "rifasatura_notte": bool(o.cfg.get("rifasa", True)),
+                "ultimo": (o.registro[-1][9:] if o.registro else "")}
+        chiave = json.dumps([stato, attr], sort_keys=True)
+        if chiave == self.mandato and int(time.time()) % 300 > 3:
+            return
+        try:
+            self._api("POST", f"states/{SENSORE}", {"state": stato, "attributes": attr})
+            self.mandato = chiave
+        except Exception:  # noqa: BLE001
+            pass
+
+    def giro(self) -> None:
+        primo = True
+        while True:
+            try:
+                self.giro_uno(primo)
+                primo = False
+                self.scrivi_stato()
+            except Exception as e:  # noqa: BLE001
+                print(f"[orologio] HA: {type(e).__name__}: {e}", flush=True)
+            time.sleep(2)
+
+
 def gestore(o: Orologio, gettone: str):
     class H(BaseHTTPRequestHandler):
         server_version = "loco-orologio"
@@ -767,6 +879,8 @@ def main() -> int:
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     o.avvia_dbus()
     threading.Thread(target=o.giro, daemon=True).start()
+    if SOLO_HA:
+        threading.Thread(target=ComandiHA(o).giro, daemon=True).start()
     o.scrivi(f"in ascolto su {ASCOLTO}:{PORTA}{' solo da ' + ','.join(sorted(DA)) if DA else ''}, orologio {o.cfg.get('indirizzo') or 'non ancora abbinato'}")
     from gi.repository import GLib
     try:

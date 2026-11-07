@@ -16,3 +16,17 @@ Ascolta sulla porta `porta` (8483) e risponde **solo** agli indirizzi in `da` (s
 
 **Abbinare**: tasto blu dietro l'orologio finché la luce davanti pulsa arancione, poi `{"cosa": "abbina"}`. Accetta
 abbinamenti solo in quei 90 secondi e solo da un orologio Echo. Mai scritto sul canale 2 (firmware) dell'orologio.
+
+## Da Home Assistant (1.1.0)
+
+Ora, abbinamento e calibrazione si fanno solo da HA (da pc-01 restano timer, sveglie, avvisi e le prove).
+L'add-on legge ogni 2 secondi questi aiutanti:
+
+- `input_button.orologio_cucina_abbina`: 60 secondi di ricerca (prima tieni premuto il tasto dietro finché la luce pulsa arancione)
+- `input_button.orologio_cucina_calibra`: lancette a 12:00 per 10 minuti
+- `input_button.orologio_cucina_rimanda_l_ora`: rimanda l'ora subito
+- `input_button.orologio_cucina_dimentica`: toglie l'abbinamento
+- `input_number.orologio_cucina_correzione`: minuti di correzione (-30…30)
+- `input_boolean.orologio_cucina_rifasatura_notte`: la rifasatura delle 03:30
+
+e scrive `sensor.orologio_cucina_stato` (collegato, staccato, in abbinamento, in calibrazione, da abbinare)
