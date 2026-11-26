@@ -230,6 +230,30 @@ class Sessione:
                 scrivi(f"{self.mac}: non riesco a scrivere ({e})")
             self.seq = (self.seq + 1) % 16
 
+    def nuovi_dati(self, s: socket.socket) -> None:
+        vecchio, self.dati = self.dati, s
+        try:
+            vecchio.close()
+        except OSError:
+            pass
+
+    def ascolta_controllo(self) -> None:
+        """Quello che il controller dice sul canale di controllo (risposte, HANDSHAKE): si legge e si scrive nel registro"""
+        visti = 0
+        while self.vivo:
+            try:
+                self.ctrl.settimeout(1.0)
+                r = self.ctrl.recv(256)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            if not r:
+                return
+            visti += 1
+            if visti <= 8:
+                scrivi(f"{self.mac}: controllo, {len(r)} byte ({r[:6].hex()})")
+
     def vibra(self, forte: bool) -> None:
         def giro():
             self.manda(vibra=(255, 255) if forte else (120, 0))
@@ -238,14 +262,9 @@ class Sessione:
         threading.Thread(target=giro, daemon=True).start()
 
     def avvia(self) -> None:
+        threading.Thread(target=self.ascolta_controllo, daemon=True).start()
         try:
-            self.ctrl.settimeout(2)
             self.ctrl.send(ds.chiedi_calibrazione())      # da qui manda il rapporto pieno 0x31
-            try:
-                r = self.ctrl.recv(128)
-                scrivi(f"{self.mac}: calibrazione, risposta di {len(r)} byte ({r[:4].hex()})")
-            except OSError as e:
-                scrivi(f"{self.mac}: calibrazione senza risposta ({e})")
         except OSError as e:
             scrivi(f"{self.mac}: calibrazione non chiesta ({e})")
         self.manda(grezzo=ds.Uscita(spegni_animazione=True))   # via l'animazione dell'accensione, come il driver
@@ -264,6 +283,15 @@ class Sessione:
                 p = self.dati.recv(128)
             except socket.timeout:
                 fermo += 1
+                if fermo in (3, 10) and visti == 0:       # zitto: si richiede, prima col protocollo «report»
+                    scrivi(f"{self.mac}: ancora niente dal canale dati dopo {fermo} s, richiedo")
+                    try:
+                        self.ctrl.send(bytes((0x71,)))     # HIDP SET_PROTOCOL report
+                        time.sleep(0.2)
+                        self.ctrl.send(ds.chiedi_calibrazione())
+                    except OSError:
+                        pass
+                    self.manda()
                 if fermo < 30:
                     continue
                 scrivi(f"{self.mac}: 30 s senza niente dal canale dati ({visti} pacchetti in tutto)")
@@ -486,6 +514,11 @@ class Centro:
             "/loco/controller/agente", "NoInputNoOutput")      # mai RequestDefaultAgent: quello è dell'orologio
         self.scheda = self.scegli_scheda()
         scrivi(f"Bluetooth: {self.scheda}")
+        for c in self.nostri():
+            i = self.info(self.dev_path(c["mac"]))
+            scrivi(f"DualSense {c['numero']} ({c['mac']}): " + (
+                f"Paired={bool(i.get('Paired'))} Bonded={bool(i.get('Bonded'))} Trusted={bool(i.get('Trusted'))}"
+                if i else "BlueZ non lo conosce più: va riabbinato"))
 
     def scegli_scheda(self) -> str:
         """La chiavetta già accesa (quella dell'orologio). Non si accende niente: se è spenta l'ha spenta qualcuno"""
@@ -554,6 +587,9 @@ class Centro:
             dev.Pair(timeout=40)
             self.proprieta(self.dev_path(mac), "org.bluez.Device1").Set("org.bluez.Device1", "Trusted",
                                                                        dbus.Boolean(True))
+            i = self.info(self.dev_path(mac))
+            scrivi(f"{mac}: Paired={bool(i.get('Paired'))} Bonded={bool(i.get('Bonded'))} "
+                   f"Trusted={bool(i.get('Trusted'))} (senza Bonded alla riaccensione non si ricollega)")
             c = self.trova(mac)
             if c is None:
                 numeri = {x["numero"] for x in self.nostri()}
@@ -648,10 +684,12 @@ class Centro:
                 scrivi(f"canale {psm:#04x}: {e}")
                 time.sleep(2)
                 continue
-            mac = mac.upper()
+            mac = str(mac).upper()
             if self.trova(mac) is None:                    # non è un nostro controller: niente
+                scrivi(f"canale {psm:#04x} da {mac}: non è un nostro controller, chiuso")
                 c.close()
                 continue
+            scrivi(f"canale {psm:#04x} aperto da {mac}")
             self.arrivato(mac, psm, c)
 
     def arrivato(self, mac: str, psm: int, s: socket.socket) -> None:
@@ -667,6 +705,12 @@ class Centro:
                 return
             ctrl = self.attesa.pop(mac, None)
             if ctrl is None:
+                vecchia = self.sessioni.get(mac)
+                if vecchia is not None:                    # il controller riapre i dati sulla sessione che c'è
+                    scrivi(f"{mac}: canale dati nuovo sulla sessione aperta")
+                    vecchia.nuovi_dati(s)
+                    return
+                scrivi(f"{mac}: canale dati senza controllo, chiuso")
                 s.close()
                 return
             sess = Sessione(self, mac, ctrl, s)
