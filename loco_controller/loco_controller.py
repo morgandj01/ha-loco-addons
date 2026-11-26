@@ -242,9 +242,10 @@ class Sessione:
             self.ctrl.settimeout(2)
             self.ctrl.send(ds.chiedi_calibrazione())      # da qui manda il rapporto pieno 0x31
             try:
-                self.ctrl.recv(64)
-            except OSError:
-                pass
+                r = self.ctrl.recv(128)
+                scrivi(f"{self.mac}: calibrazione, risposta di {len(r)} byte ({r[:4].hex()})")
+            except OSError as e:
+                scrivi(f"{self.mac}: calibrazione senza risposta ({e})")
         except OSError as e:
             scrivi(f"{self.mac}: calibrazione non chiesta ({e})")
         self.manda(grezzo=ds.Uscita(spegni_animazione=True))   # via l'animazione dell'accensione, come il driver
@@ -257,7 +258,7 @@ class Sessione:
 
     def leggi(self) -> None:
         self.dati.settimeout(1.0)
-        fermo = corti = 0
+        fermo = corti = visti = 0
         while self.vivo:
             try:
                 p = self.dati.recv(128)
@@ -265,12 +266,18 @@ class Sessione:
                 fermo += 1
                 if fermo < 30:
                     continue
+                scrivi(f"{self.mac}: 30 s senza niente dal canale dati ({visti} pacchetti in tutto)")
                 break                                     # 30 s senza un rapporto: è spento
-            except OSError:
+            except OSError as e:
+                scrivi(f"{self.mac}: canale dati chiuso ({e})")
                 break
             if not p:
+                scrivi(f"{self.mac}: il controller ha chiuso il canale dati")
                 break
             fermo = 0
+            visti += 1
+            if visti <= 3 or visti in (100, 1000):
+                scrivi(f"{self.mac}: pacchetto {visti}, {len(p)} byte ({p[:4].hex()})")
             s = ds.leggi(p)
             if s is None:
                 corti += 1
