@@ -72,6 +72,19 @@ NOMI_TASTI = {"croce": "Croce", "cerchio": "Cerchio", "quadrato": "Quadrato", "t
               "su": "Su", "giu": "Giù", "sinistra": "Sinistra", "destra": "Destra"}
 
 
+# lo spegnimento da solo quando non lo usi (come la PS5): si sceglie in HA, per ogni controller
+RIPOSO = {"Mai": 0, "5 minuti": 300, "10 minuti": 600, "15 minuti": 900, "20 minuti": 1200, "30 minuti": 1800,
+          "1 ora": 3600}
+RIPOSO_DI_BASE = "10 minuti"                # come la PS5
+
+
+def in_uso(s: ds.Stato) -> bool:
+    """Qualcuno lo sta usando: un tasto, uno stick fuori dalla zona morta, un grilletto, un dito sul touchpad. Il
+    giroscopio no: un controller appoggiato sul tavolo trema da solo"""
+    return bool(s.premuti) or any(asse(v) for v in (*s.stick_sx, *s.stick_dx)) or s.l2 > 12 or s.r2 > 12 \
+        or s.tocchi[0] is not None
+
+
 def tasti_cambiati(prima: frozenset[str], adesso: frozenset[str]) -> dict[str, bool]:
     """Solo i tasti che sono cambiati: premuto (True) o lasciato (False)"""
     return {k: k in adesso for k in sorted(prima ^ adesso)}
@@ -158,6 +171,8 @@ def configurazioni(mac: str, numero: int) -> list[tuple[str, dict]]:
           state_topic=f"{t}/led_microfono", payload_on="si", payload_off="no", icon="mdi:microphone-message"),
         e("select", "grilletto_sx", "Grilletto L2", command_topic=f"{t}/grilletto_sx/set",
           state_topic=f"{t}/grilletto_sx", options=list(ds.GRILLETTO), icon="mdi:pistol"),
+        e("select", "riposo", "Spegnimento automatico", command_topic=f"{t}/riposo/set", state_topic=f"{t}/riposo",
+          options=list(RIPOSO), icon="mdi:timer-sleep", entity_category="config"),
         e("select", "grilletto_dx", "Grilletto R2", command_topic=f"{t}/grilletto_dx/set",
           state_topic=f"{t}/grilletto_dx", options=list(ds.GRILLETTO), icon="mdi:pistol"),
         e("button", "vibra", "Vibra", command_topic=f"{t}/vibra", payload_press="corta", icon="mdi:vibrate"),
@@ -261,6 +276,8 @@ class Sessione:
         self.vivo = True
         self.chiuso = False
         self.ultimo: ds.Stato | None = None
+        self.usato = time.time()                          # l'ultima volta che qualcuno l'ha toccato
+        self.a_riposo = False
 
     def manda(self, grezzo: ds.Uscita | None = None, **cosa) -> None:
         """Ogni pacchetto porta tutto quello che si vuole (luce, LED): cambiare una cosa non spegne le altre"""
@@ -325,6 +342,7 @@ class Sessione:
                     if fermo in (3, 10) and pieni == 0:
                         scrivi(f"{self.mac}: niente dopo {fermo} s ({visti} rapporti corti), richiedo la calibrazione")
                         threading.Thread(target=self.chiedi_calibrazione, daemon=True).start()
+                    self.forse_a_riposo(time.time())
                     if fermo == 20 and visti == 0:            # collegato e muto: lo sblocca solo una riaccensione
                         self.c.stato(f"DualSense {self.c.numero(self.mac)} collegato ma muto: spegnilo (tieni PS "
                                      f"10 secondi) e riaccendilo")
@@ -348,12 +366,26 @@ class Sessione:
                 continue
             corti = 0
             pieni += 1
+            if pieni % 250 == 0:                          # circa una volta al secondo
+                self.forse_a_riposo(time.time())
             if pieni == 1:
                 self.c.stato(f"DualSense {self.c.numero(self.mac)} collegato")
             self.passa(s, time.time())
         self.chiudi()
 
+    def forse_a_riposo(self, adesso: float) -> bool:
+        """Fermo da più del tempo scelto: si spegne (una volta sola)"""
+        scelto = RIPOSO.get(self.c.voluto(self.mac)["riposo"], 0)
+        if not scelto or self.a_riposo or adesso - self.usato < scelto:
+            return False
+        self.a_riposo = True
+        self.c.stato(f"DualSense {self.c.numero(self.mac)} spento: fermo da {self.c.voluto(self.mac)['riposo']}")
+        threading.Thread(target=self.c.spegni, args=(self.mac,), daemon=True).start()
+        return True
+
     def passa(self, s: ds.Stato, adesso: float) -> None:
+        if in_uso(s):
+            self.usato = adesso
         t = f"{BASE}/{self.o}"
         prima = self.ultimo
         for k, giu in tasti_cambiati(prima.premuti if prima else frozenset(), s.premuti).items():
@@ -423,7 +455,8 @@ class Centro:
         c = self.trova(mac) or {}
         return {"luce": c.get("luce") or {"acceso": True, "colore": AZZURRO, "luminosita": 255},
                 "giocatore": c.get("giocatore", c.get("numero", 1)), "led_microfono": bool(c.get("led_microfono")),
-                "grilletto_sx": c.get("grilletto_sx", "libero"), "grilletto_dx": c.get("grilletto_dx", "libero")}
+                "grilletto_sx": c.get("grilletto_sx", "libero"), "grilletto_dx": c.get("grilletto_dx", "libero"),
+                "riposo": c.get("riposo", RIPOSO_DI_BASE)}
 
     # MQTT
     def avvia_mqtt(self) -> None:
@@ -479,6 +512,7 @@ class Centro:
         self.pubblica(f"{BASE}/{o}/led_microfono", "si" if v["led_microfono"] else "no", True)
         self.pubblica(f"{BASE}/{o}/grilletto_sx", v["grilletto_sx"], True)
         self.pubblica(f"{BASE}/{o}/grilletto_dx", v["grilletto_dx"], True)
+        self.pubblica(f"{BASE}/{o}/riposo", v["riposo"], True)
 
     def comando(self, topic: str, testo: str) -> None:
         parti = topic.split("/")
@@ -502,6 +536,10 @@ class Centro:
             c["giocatore"] = NOMI_LED.index(testo)
         elif cosa in ("grilletto_sx", "grilletto_dx") and parti[-1] == "set" and testo in ds.GRILLETTO:
             c[cosa] = testo
+        elif cosa == "riposo" and parti[-1] == "set" and testo in RIPOSO:
+            c["riposo"] = testo
+            if sess:
+                sess.usato = time.time()                  # il conto riparte da adesso
         elif cosa == "led_microfono" and parti[-1] == "set" and testo in ("si", "no"):
             c["led_microfono"] = testo == "si"
         elif cosa == "vibra" and testo in ("corta", "forte"):

@@ -27,6 +27,8 @@ controller col Bluetooth non vanno da nessuna parte fuori dalla PS5.
 - **Grilletto L2** e **Grilletto R2** (i grilletti adattivi): libero, duro, molla, pistola (duro in mezzo e poi scatta),
   mitraglietta e mitragliatrice (vibrano mentre li tieni)
 - **Vibra**, **Vibra forte**, **Spegni**, **Dimentica**
+- **Spegnimento automatico** (per ogni controller): Mai, 5, 10, 15, 20, 30 minuti o 1 ora senza toccarlo e si
+  spegne, come sulla PS5 (di base 10 minuti). Conta tasti, stick, grilletti e touchpad, non il giroscopio
 
 `scheda`: la chiavetta da usare (es. `hci0`); vuoto = quella già accesa.
 
