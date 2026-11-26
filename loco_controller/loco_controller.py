@@ -690,7 +690,10 @@ class Centro:
         vb = d.get("vibra") if isinstance(d.get("vibra"), dict) else None
         if vb and vb.get("id") != (self.da_loco.get("vibra") or {}).get("id") and self.da_loco:
             for s in list(self.sessioni.values()):        # una volta per ogni richiesta nuova (lo stato si ripete ogni 2 s)
-                s.vibra_piano(int(vb.get("ms") or 200))
+                if vb.get("forte"):
+                    s.vibra(True)                         # il comando segreto riuscito
+                else:
+                    s.vibra_piano(int(vb.get("ms") or 200))
         self.da_loco, self.da_loco_t = d, time.time()
         self.applica_loco(prima_dest, prima)
 
