@@ -1,5 +1,5 @@
 name: LOCO controller
-version: "0.1.3"
+version: "0.1.4"
 slug: loco_controller
 description: I DualSense in Home Assistant sulla stessa chiavetta Bluetooth dell'orologio (tasti, batteria, luce, LED, vibrazione)
 url: https://github.com/morgandj01/ha-loco-addons
@@ -14,6 +14,25 @@ host_dbus: true
 hassio_api: true
 services:
   - mqtt:need
+# il controller collegato è un /dev/hidrawN fatto da bluetoothd: questi nomi servono perché il Supervisor dia il
+# permesso quando compare (anche dopo l'avvio). Si apre solo quello con l'indirizzo di un nostro DualSense
+devices:
+  - /dev/hidraw0
+  - /dev/hidraw1
+  - /dev/hidraw2
+  - /dev/hidraw3
+  - /dev/hidraw4
+  - /dev/hidraw5
+  - /dev/hidraw6
+  - /dev/hidraw7
+  - /dev/hidraw8
+  - /dev/hidraw9
+  - /dev/hidraw10
+  - /dev/hidraw11
+  - /dev/hidraw12
+  - /dev/hidraw13
+  - /dev/hidraw14
+  - /dev/hidraw15
 # solo per la diagnosi (btmon legge il traffico Bluetooth): si toglie quando i controller vanno
 privileged:
   - NET_ADMIN

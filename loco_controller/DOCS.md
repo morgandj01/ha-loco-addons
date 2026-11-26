@@ -4,8 +4,8 @@ I **DualSense** (PS5) in Home Assistant, senza PS5. Usa la chiavetta Bluetooth (
 usa anche l'add-on «LOCO orologio»: i due stanno insieme e questo non tocca niente dell'orologio (non prende l'agente
 di base, non accende, non rinomina e non rende visibile la chiavetta, apre l'abbinamento solo nei suoi 90 secondi).
 
-Il sistema di HA non sa collegare un controller (gli manca la parte HID del Bluetooth): l'add-on lo fa da sé, coi due
-canali HID del DualSense, e parla il suo protocollo (lo stesso del driver di Linux). Microfono e altoparlante del
+Il Bluetooth di HA accoglie il controller e ne fa un dispositivo HID (`/dev/hidrawN`), ma il sistema non ha il driver
+del DualSense: l'add-on legge e scrive quel dispositivo e parla il suo protocollo (lo stesso del driver di Linux). Microfono e altoparlante del
 controller col Bluetooth non vanno da nessuna parte fuori dalla PS5.
 
 ## Abbinare

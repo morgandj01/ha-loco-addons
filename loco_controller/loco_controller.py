@@ -1,8 +1,8 @@
 """LOCO controller · i DualSense in Home Assistant sulla chiavetta Bluetooth dell'orologio (26 novembre 2026, ADR 0220).
 
 Morgan: «continua a scrivere la cosa di HA [...] stai attento a non fare nulla all'orologio». Il sistema di HA non ha
-la parte del Bluetooth che accoglie i controller, quindi la fa questo programma: abbina il DualSense con BlueZ (D-Bus),
-apre lui i due canali HID (L2CAP 0x11 e 0x13) e parla il protocollo di `dualsense.py`. In HA tutto arriva da MQTT
+il driver del DualSense, quindi lo fa questo programma: abbina il DualSense con BlueZ (D-Bus), lascia i canali HID a
+bluetoothd che ne fa un /dev/hidrawN, e lì parla il protocollo di `dualsense.py`. In HA tutto arriva da MQTT
 discovery: un dispositivo «LOCO controller» col pulsante per abbinare e uno per ogni controller con batteria, tasti
 (come eventi), stick, grilletti, giroscopio, luce, LED del giocatore, LED del microfono, vibrazione, spegni, dimentica.
 
@@ -11,7 +11,8 @@ L'orologio usa la stessa chiavetta (add-on «LOCO orologio»). Qui non si tocca 
 - `Pairable` si accende solo nei 90 secondi dell'abbinamento e torna com'era (l'orologio lo tiene spento)
 - mai Powered, Discoverable, Alias, Class della chiavetta; la ricerca solo nella finestra di abbinamento
 - si toglie (Dimentica) solo un indirizzo che è nostro e che BlueZ dice essere un DualSense
-- i canali HID non c'entrano con la porta seriale dell'orologio (RFCOMM)
+- i canali HID li tiene bluetoothd e non c'entrano con la porta seriale dell'orologio (RFCOMM); noi apriamo solo
+  l'hidraw che ha l'indirizzo di un nostro DualSense
 
 Nessun tasto comanda niente da qui: i tasti diventano eventi in HA e cosa fanno lo decidono le automazioni e LOCO. Mai
 cancello, allarme, serrature, sirene o telecamere (FORBIDDEN)."""
@@ -20,8 +21,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import socket
-import struct
 import sys
 import threading
 import time
@@ -37,7 +36,6 @@ DISCOVERY = "homeassistant"
 AZZURRO = (36, 118, 254)                  # gli occhi di LOCO
 LUNGO_S = 0.8                             # un tasto tenuto così è «lungo» (il PS lungo farà ascoltare LOCO)
 FINESTRA_S = 90
-SOL_BLUETOOTH, BT_SECURITY = 274, 4
 NOMI_LED = ("Spenti", "1", "2", "3", "4", "5")
 
 
@@ -208,11 +206,38 @@ def rgb_vero(luce: dict) -> tuple[int, int, int]:
 
 
 # --- il controller collegato -----------------------------------------------------------------------------------------
+# Come arriva (provato il 26 sera con btmon): i canali HID li prende bluetoothd, il Bluetooth di HA, che li ascolta
+# sull'indirizzo preciso della chiavetta (vince sempre su chi ascolta «su tutte», come facevamo noi) e crea da sé il
+# dispositivo HID (uhid). Quindi non si combatte con lui: il controller diventa un /dev/hidrawN del sistema, e noi
+# leggiamo e scriviamo lì. bluetoothd toglie e mette l'intestazione HIDP (0xA1/0xA2), il resto è uguale
+
+HIDRAW = Path("/sys/class/hidraw")
+
+
+def trova_hidraw(mac: str, radice: Path = HIDRAW) -> str | None:
+    """Il /dev/hidrawN di quel DualSense: bluetoothd mette l'indirizzo del controller in HID_UNIQ"""
+    m = mac.lower()
+    for d in sorted(radice.glob("hidraw*")):
+        try:
+            ue = (d / "device" / "uevent").read_text()
+        except OSError:
+            continue
+        v = dict(r.split("=", 1) for r in ue.splitlines() if "=" in r)
+        hid = v.get("HID_ID", "").upper()
+        if v.get("HID_UNIQ", "").strip().lower() == m and (":0000054C:00000CE6" in hid or ":0000054C:00000DF2" in hid):
+            return f"/dev/{d.name}"
+    return None
+
+
+def hidiocgfeature(n: int) -> int:
+    """HIDIOCGFEATURE(n) di <linux/hidraw.h>: _IOC(_IOC_WRITE|_IOC_READ, 'H', 0x07, n)"""
+    return (3 << 30) | (n << 16) | (ord("H") << 8) | 0x07
+
 
 class Sessione:
-    """Un DualSense collegato: i due canali L2CAP, la lettura dei rapporti e le uscite"""
-    def __init__(self, centro: "Centro", mac: str, ctrl: socket.socket, dati: socket.socket) -> None:
-        self.c, self.mac, self.ctrl, self.dati = centro, mac, ctrl, dati
+    """Un DualSense collegato: il suo hidraw, la lettura dei rapporti e le uscite"""
+    def __init__(self, centro: "Centro", mac: str, fd: int, percorso: str = "") -> None:
+        self.c, self.mac, self.fd, self.percorso = centro, mac, fd, percorso
         self.o = oggetto(mac)
         self.seq = 0
         self.lock = threading.Lock()
@@ -230,34 +255,21 @@ class Sessione:
                                 grilletto_dx=voluto["grilletto_dx"], **cosa)
         with self.lock:
             try:
-                self.dati.send(ds.scrivi(u, self.seq))
+                os.write(self.fd, ds.scrivi(u, self.seq)[1:])     # senza 0xA2: lo mette bluetoothd
             except OSError as e:
                 scrivi(f"{self.mac}: non riesco a scrivere ({e})")
             self.seq = (self.seq + 1) % 16
 
-    def nuovi_dati(self, s: socket.socket) -> None:
-        vecchio, self.dati = self.dati, s
+    def chiedi_calibrazione(self) -> None:
+        """Il rapporto «feature» 0x05: da lì il controller manda il rapporto pieno 0x31 (lo chiede bluetoothd per noi)"""
+        import fcntl
+        buf = bytearray(64)
+        buf[0] = ds.CALIBRAZIONE
         try:
-            vecchio.close()
-        except OSError:
-            pass
-
-    def ascolta_controllo(self) -> None:
-        """Quello che il controller dice sul canale di controllo (risposte, HANDSHAKE): si legge e si scrive nel registro"""
-        visti = 0
-        while self.vivo:
-            try:
-                self.ctrl.settimeout(1.0)
-                r = self.ctrl.recv(256)
-            except socket.timeout:
-                continue
-            except OSError:
-                return
-            if not r:
-                return
-            visti += 1
-            if visti <= 8:
-                scrivi(f"{self.mac}: controllo, {len(r)} byte ({r[:6].hex()})")
+            n = fcntl.ioctl(self.fd, hidiocgfeature(len(buf)), buf, True)
+            scrivi(f"{self.mac}: calibrazione letta ({n} byte)")
+        except OSError as e:
+            scrivi(f"{self.mac}: calibrazione non letta ({e})")
 
     def vibra(self, forte: bool) -> None:
         def giro():
@@ -267,60 +279,48 @@ class Sessione:
         threading.Thread(target=giro, daemon=True).start()
 
     def avvia(self) -> None:
-        threading.Thread(target=self.ascolta_controllo, daemon=True).start()
-        try:
-            self.ctrl.send(ds.chiedi_calibrazione())      # da qui manda il rapporto pieno 0x31
-        except OSError as e:
-            scrivi(f"{self.mac}: calibrazione non chiesta ({e})")
+        threading.Thread(target=self.leggi, daemon=True).start()
+        self.chiedi_calibrazione()
         self.manda(grezzo=ds.Uscita(spegni_animazione=True))   # via l'animazione dell'accensione, come il driver
         time.sleep(0.1)
         self.manda()                                      # poi la luce e il numero
         self.c.pubblica(f"{BASE}/{self.o}/vivo", "online", True)
         self.c.pubblica(f"{BASE}/{self.o}/collegato", "si", True)
         self.c.pubblica_voluto(self.mac)
-        threading.Thread(target=self.leggi, daemon=True).start()
 
     def leggi(self) -> None:
-        self.dati.settimeout(1.0)
-        fermo = corti = visti = 0
+        import select
+        fermo = corti = visti = pieni = 0
         while self.vivo:
             try:
-                p = self.dati.recv(128)
-            except socket.timeout:
-                fermo += 1
-                if fermo in (3, 10) and visti == 0:       # zitto: si richiede, prima col protocollo «report»
-                    scrivi(f"{self.mac}: ancora niente dal canale dati dopo {fermo} s, richiedo")
-                    try:
-                        self.ctrl.send(bytes((0x71,)))     # HIDP SET_PROTOCOL report
-                        time.sleep(0.2)
-                        self.ctrl.send(ds.chiedi_calibrazione())
-                    except OSError:
-                        pass
-                    self.manda()
-                if fermo < 30:
+                pronto, _, _ = select.select([self.fd], [], [], 1.0)
+                if not pronto:
+                    fermo += 1
+                    if fermo in (3, 10) and pieni == 0:
+                        scrivi(f"{self.mac}: niente dopo {fermo} s ({visti} rapporti corti), richiedo la calibrazione")
+                        threading.Thread(target=self.chiedi_calibrazione, daemon=True).start()
                     continue
-                scrivi(f"{self.mac}: 30 s senza niente dal canale dati ({visti} pacchetti in tutto)")
-                break                                     # 30 s senza un rapporto: è spento
-            except OSError as e:
-                scrivi(f"{self.mac}: canale dati chiuso ({e})")
+                p = os.read(self.fd, 128)
+            except (OSError, ValueError) as e:            # il controller si è staccato: hidraw sparisce
+                scrivi(f"{self.mac}: hidraw chiuso ({e})")
                 break
             if not p:
-                scrivi(f"{self.mac}: il controller ha chiuso il canale dati")
+                scrivi(f"{self.mac}: hidraw finito")
                 break
             fermo = 0
             visti += 1
             if visti <= 3 or visti in (100, 1000):
-                scrivi(f"{self.mac}: pacchetto {visti}, {len(p)} byte ({p[:4].hex()})")
-            s = ds.leggi(p)
+                scrivi(f"{self.mac}: rapporto {visti}, {len(p)} byte ({p[:4].hex()})")
+            s = ds.leggi(bytes((ds.HIDP_DATI_ENTRATA,)) + p)  # il CRC conta anche l'intestazione 0xA1
             if s is None:
                 corti += 1
-                if corti == 250:                          # ancora il rapporto corto: la calibrazione non è arrivata
-                    try:
-                        self.ctrl.send(ds.chiedi_calibrazione())
-                    except OSError:
-                        pass
+                if corti in (250, 2500):                  # ancora il rapporto corto: la calibrazione non è arrivata
+                    threading.Thread(target=self.chiedi_calibrazione, daemon=True).start()
                 continue
             corti = 0
+            pieni += 1
+            if pieni == 1:
+                self.c.stato(f"DualSense {self.c.numero(self.mac)} collegato")
             self.passa(s, time.time())
         self.chiudi()
 
@@ -345,11 +345,10 @@ class Sessione:
             return
         self.chiuso = True
         self.vivo = False
-        for s in (self.dati, self.ctrl):
-            try:
-                s.close()
-            except OSError:
-                pass
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
         self.c.staccato(self.mac, self)
 
 
@@ -364,7 +363,6 @@ class Centro:
         except (OSError, ValueError):
             self.cfg = {"controller": []}
         self.sessioni: dict[str, Sessione] = {}
-        self.attesa: dict[str, socket.socket] = {}        # canale di controllo arrivato, aspetta quello dei dati
         self.lock = threading.Lock()
         self.abbina_fino = 0.0
         self.mq = None
@@ -382,6 +380,9 @@ class Centro:
 
     def trova(self, mac: str) -> dict | None:
         return next((c for c in self.nostri() if c["mac"] == mac), None)
+
+    def numero(self, mac: str) -> int:
+        return (self.trova(mac) or {}).get("numero", 0)
 
     def voluto(self, mac: str) -> dict:
         c = self.trova(mac) or {}
@@ -610,11 +611,11 @@ class Centro:
                 self.nostri().append(c)
                 self.salva()
             self.annuncia(c)
-            for _ in range(30):                           # spesso dopo l'abbinamento ci chiama lui
+            for _ in range(200):                          # dopo l'abbinamento si collega lui (bluetoothd lo accoglie)
                 if mac in self.sessioni:
                     break
                 time.sleep(0.1)
-            if mac in self.sessioni or self.collega(mac):
+            if mac in self.sessioni:
                 self.stato(f"DualSense {c['numero']} abbinato e collegato")
             else:
                 self.stato(f"DualSense {c['numero']} abbinato: premi PS per collegarlo")
@@ -678,75 +679,50 @@ class Centro:
         self.salva()
         self.stato(f"DualSense {c['numero']} dimenticato")
 
-    # Bluetooth: i canali HID
-    def presa(self) -> socket.socket:
-        s = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_SEQPACKET, socket.BTPROTO_L2CAP)
-        s.setsockopt(SOL_BLUETOOTH, BT_SECURITY, struct.pack("BB", 2, 0))   # cifrato, come vuole l'HID
-        return s
-
-    def ascolta(self, psm: int) -> None:
-        s = self.presa()
-        s.bind(("00:00:00:00:00:00", psm))
-        s.listen(4)
-        scrivi(f"ascolto sul canale HID {psm:#04x}")
+    # il controller collegato = il suo hidraw
+    def sorveglia(self) -> None:
+        """Ogni secondo: un nostro DualSense che ha il suo hidraw e non ha la sessione la apre. Se BlueZ lo dà collegato
+        e l'hidraw non viene, lo si scrive una volta (con quello che serve a capire)"""
+        detto: set[tuple[str, str]] = set()
+        connesso_da: dict[str, float] = {}
         while True:
-            try:
-                c, (mac, _psm) = s.accept()
-            except OSError as e:
-                scrivi(f"canale {psm:#04x}: {e}")
-                time.sleep(2)
-                continue
-            mac = str(mac).upper()
-            if self.trova(mac) is None:                    # non è un nostro controller: niente
-                scrivi(f"canale {psm:#04x} da {mac}: non è un nostro controller, chiuso")
-                c.close()
-                continue
-            scrivi(f"canale {psm:#04x} aperto da {mac}")
-            self.arrivato(mac, psm, c)
-
-    def arrivato(self, mac: str, psm: int, s: socket.socket) -> None:
-        with self.lock:
-            if psm == ds.PSM_CONTROLLO:
-                vecchio = self.sessioni.pop(mac, None)
-                if vecchio:
-                    threading.Thread(target=vecchio.chiudi, daemon=True).start()
-                prima = self.attesa.pop(mac, None)
-                if prima:
-                    prima.close()
-                self.attesa[mac] = s
-                return
-            ctrl = self.attesa.pop(mac, None)
-            if ctrl is None:
-                vecchia = self.sessioni.get(mac)
-                if vecchia is not None:                    # il controller riapre i dati sulla sessione che c'è
-                    scrivi(f"{mac}: canale dati nuovo sulla sessione aperta")
-                    vecchia.nuovi_dati(s)
-                    return
-                scrivi(f"{mac}: canale dati senza controllo, chiuso")
-                s.close()
-                return
-            sess = Sessione(self, mac, ctrl, s)
-            self.sessioni[mac] = sess
-        scrivi(f"{mac} collegato")
-        threading.Thread(target=sess.avvia, daemon=True).start()     # l'ascolto intanto resta libero
-
-    def collega(self, mac: str) -> bool:
-        """Dopo l'abbinamento i canali li apre il computer (le volte dopo li apre il controller quando premi PS)"""
-        try:
-            ctrl = self.presa()
-            ctrl.settimeout(10)
-            ctrl.connect((mac, ds.PSM_CONTROLLO))
-            dati = self.presa()
-            dati.settimeout(10)
-            dati.connect((mac, ds.PSM_DATI))
-        except OSError as e:
-            scrivi(f"{mac}: canali HID non aperti ({e})")
-            return False
-        with self.lock:
-            sess = Sessione(self, mac, ctrl, dati)
-            self.sessioni[mac] = sess
-        sess.avvia()
-        return True
+            for c in list(self.nostri()):
+                mac = c["mac"]
+                if mac in self.sessioni:
+                    connesso_da.pop(mac, None)
+                    continue
+                percorso = trova_hidraw(mac)
+                if percorso is None:
+                    detto.discard((mac, "permesso"))
+                    if bool(self.info(self.dev_path(mac)).get("Connected")):
+                        da = connesso_da.setdefault(mac, time.time())
+                        if time.time() - da > 15 and (mac, "hidraw") not in detto:
+                            detto.add((mac, "hidraw"))
+                            uhid = "c'è" if os.path.exists("/dev/uhid") else "manca"
+                            self.stato(f"DualSense {c['numero']} collegato al Bluetooth ma il sistema non lo presenta "
+                                       f"(nessun hidraw; uhid {uhid})")
+                            for d in sorted(HIDRAW.glob("hidraw*")):
+                                try:
+                                    scrivi(f"  {d.name}: " + " ".join((d / "device" / "uevent").read_text().split()))
+                                except OSError:
+                                    pass
+                    else:
+                        connesso_da.pop(mac, None)
+                        detto.discard((mac, "hidraw"))
+                    continue
+                try:
+                    fd = os.open(percorso, os.O_RDWR)
+                except OSError as e:                      # il permesso lo dà il Supervisor qualche secondo dopo
+                    if (mac, "permesso") not in detto:
+                        detto.add((mac, "permesso"))
+                        scrivi(f"{mac}: {percorso} c'è ma non si apre ancora ({e}), riprovo")
+                    continue
+                sess = Sessione(self, mac, fd, percorso)
+                with self.lock:
+                    self.sessioni[mac] = sess
+                scrivi(f"{mac} collegato ({percorso})")
+                threading.Thread(target=sess.avvia, daemon=True).start()
+            time.sleep(1)
 
     def staccato(self, mac: str, sess: Sessione) -> None:
         with self.lock:
@@ -805,8 +781,7 @@ def main() -> int:
     c = Centro(Path(os.environ.get("CONTROLLER_DATI", "/data")))
     c.avvia_dbus()
     c.avvia_mqtt()
-    for psm in (ds.PSM_CONTROLLO, ds.PSM_DATI):
-        threading.Thread(target=c.ascolta, args=(psm,), daemon=True).start()
+    threading.Thread(target=c.sorveglia, daemon=True).start()
     if os.environ.get("CONTROLLER_DIAGNOSI") == "true":          # anche all'avvio: si vede la riaccensione col PS
         threading.Thread(target=diagnosi_bluetooth, args=(300,), daemon=True).start()
     from gi.repository import GLib
