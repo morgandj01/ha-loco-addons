@@ -210,7 +210,46 @@ def configurazioni_centro() -> list[tuple[str, dict]]:
         (f"{DISCOVERY}/sensor/loco_controller/stato/config",
          {"name": "Stato", "unique_id": "loco_controller_stato", "default_entity_id": "sensor.loco_controller_stato",
           "state_topic": f"{BASE}/stato", "device": disp, "availability": vivo, "icon": "mdi:bluetooth"}),
+        # dove va il controller adesso, lo decide LOCO (ADR 0221): appletv, loco, telecamere, windows. L'automazione
+        # dell'Apple TV comanda solo con «appletv»
+        (f"{DISCOVERY}/sensor/loco_controller/destinazione/config",
+         {"name": "Destinazione", "unique_id": "loco_controller_destinazione",
+          "default_entity_id": "sensor.loco_controller_destinazione", "state_topic": f"{BASE}/destinazione",
+          "device": disp, "availability": vivo, "icon": "mdi:target"}),
     ]
+
+
+# --- il canale veloce verso LOCO (ADR 0221) ------------------------------------------------------------------------
+# Lo stato intero del controller su MQTT, fuori da HA: il ponte loco-controller su pc-01 lo porta allo schermo che lo
+# usa. A ogni cambio (stick e grilletti in numeri interi, accelerometro a quarti di g, il dito in millesimi), al massimo
+# VELOCE_HZ volte al secondo, e una volta al secondo da fermo (così lo schermo sa che c'è)
+VELOCE_HZ = 60
+DA_LOCO_SCADE_S = 30.0          # senza notizie da LOCO da tanto: torna tutto come se LOCO non ci fosse (Apple TV)
+
+
+def veloce(s: ds.Stato, numero: int) -> dict:
+    g = grandezze(s)
+    toc = [[round(p[0] / 1919, 3), round(p[1] / 1079, 3)] if p else None for p in s.tocchi]
+    return {"n": numero, "tasti": sorted(s.premuti),
+            "stick": [int(g["stick_sx_x"]), int(g["stick_sx_y"]), int(g["stick_dx_x"]), int(g["stick_dx_y"])],
+            "l2": int(g["l2"]), "r2": int(g["r2"]),
+            "acc": [round(a / 8192 * 4) / 4 for a in s.accelerometro], "tocco": toc}
+
+
+def luce_da_loco(c: dict) -> dict | None:
+    """{luce: [r, g, b], giocatore, led_microfono} di LOCO → le parti di `voluto`. Sempre al 100% (Morgan)"""
+    if not isinstance(c, dict) or not c:
+        return None
+    luce = c.get("luce")
+    out = {}
+    if isinstance(luce, list) and len(luce) == 3 and all(isinstance(v, int) for v in luce):
+        rgb = tuple(max(0, min(255, v)) for v in luce)
+        out["luce"] = {"acceso": any(rgb), "colore": rgb if any(rgb) else AZZURRO, "luminosita": 255}
+    if isinstance(c.get("giocatore"), int) and 0 <= c["giocatore"] <= 5:
+        out["giocatore"] = c["giocatore"]
+    if isinstance(c.get("led_microfono"), bool):
+        out["led_microfono"] = c["led_microfono"]
+    return out
 
 
 def luce_da_comando(payload: dict, adesso: dict) -> dict:
@@ -276,6 +315,8 @@ class Sessione:
         self.vivo = True
         self.chiuso = False
         self.ultimo: ds.Stato | None = None
+        self.veloce_t = 0.0
+        self.veloce_ultimo: dict | None = None
         self.usato = time.time()                          # l'ultima volta che qualcuno l'ha toccato
         self.a_riposo = False
 
@@ -405,6 +446,10 @@ class Sessione:
             self.c.pubblica(f"{t}/microfono_spento", "si" if s.microfono_spento else "no", True)
         for k, v in self.lento.da_mandare(grandezze(s), adesso).items():
             self.c.pubblica(f"{t}/{k}", str(v), False)
+        v = veloce(s, self.c.numero(self.mac) or 1)
+        if (v != self.veloce_ultimo and adesso - self.veloce_t >= 1 / VELOCE_HZ) or adesso - self.veloce_t >= 1.0:
+            self.veloce_t, self.veloce_ultimo = adesso, v
+            self.c.pubblica(f"{t}/veloce", json.dumps(v, separators=(",", ":")), False)
         self.ultimo = s
 
     def chiudi(self) -> None:
@@ -435,6 +480,8 @@ class Centro:
         self.mq = None
         self.bus = None
         self.scheda = ""
+        self.da_loco: dict = {}                           # l'ultimo stato mandato da LOCO (luce, LED, destinazione)
+        self.da_loco_t = 0.0
 
     # stato salvato
     def salva(self) -> None:
@@ -456,7 +503,57 @@ class Centro:
         return {"luce": c.get("luce") or {"acceso": True, "colore": AZZURRO, "luminosita": 255},
                 "giocatore": c.get("giocatore", c.get("numero", 1)), "led_microfono": bool(c.get("led_microfono")),
                 "grilletto_sx": c.get("grilletto_sx", "libero"), "grilletto_dx": c.get("grilletto_dx", "libero"),
-                "riposo": c.get("riposo", RIPOSO_DI_BASE)}
+                "riposo": c.get("riposo", RIPOSO_DI_BASE), **self.loco_vuole()}
+
+    def loco_vuole(self) -> dict:
+        """Luce, LED del giocatore e del microfono decisi da LOCO (ADR 0221), finché LOCO si fa sentire"""
+        if not self.da_loco or time.time() - self.da_loco_t > DA_LOCO_SCADE_S:
+            return {}
+        return luce_da_loco(self.da_loco.get("controller") or {}) or {}
+
+    def destinazione(self) -> str:
+        if not self.da_loco or time.time() - self.da_loco_t > DA_LOCO_SCADE_S:
+            return "appletv"
+        d = self.da_loco.get("destinazione")
+        return d if d in ("appletv", "loco", "telecamere", "windows") else "appletv"
+
+    def dice_loco(self, testo: str) -> None:
+        """Lo stato che manda LOCO (il ponte loco-controller): si applica solo quello che cambia"""
+        try:
+            d = json.loads(testo)
+        except ValueError:
+            return
+        if not isinstance(d, dict):
+            return
+        prima_dest, prima = self.destinazione(), {c["mac"]: self.voluto(c["mac"]) for c in self.nostri()}
+        self.da_loco, self.da_loco_t = d, time.time()
+        self.applica_loco(prima_dest, prima)
+
+    def applica_loco(self, prima_dest: str, prima: dict) -> None:
+        dest = self.destinazione()
+        if dest != prima_dest:
+            self.pubblica(f"{BASE}/destinazione", dest, True)
+            scrivi(f"destinazione: {dest}")
+        for c in self.nostri():
+            if self.voluto(c["mac"]) != prima.get(c["mac"]):
+                self.pubblica_voluto(c["mac"])
+                sess = self.sessioni.get(c["mac"])
+                if sess:
+                    sess.manda()
+
+    def loco_tace(self) -> None:
+        """Da sorveglia: LOCO non si fa sentire da DA_LOCO_SCADE_S, si torna come se non ci fosse (una volta)"""
+        if self.da_loco and time.time() - self.da_loco_t > DA_LOCO_SCADE_S:
+            prima = {c["mac"]: luce_da_loco(self.da_loco.get("controller") or {}) for c in self.nostri()}
+            self.da_loco = {}
+            scrivi("LOCO tace da 30 s: luce e LED come in HA, il controller all'Apple TV")
+            self.pubblica(f"{BASE}/destinazione", "appletv", True)
+            for c in self.nostri():
+                if prima.get(c["mac"]):
+                    self.pubblica_voluto(c["mac"])
+                    sess = self.sessioni.get(c["mac"])
+                    if sess:
+                        sess.manda()
 
     # MQTT
     def avvia_mqtt(self) -> None:
@@ -480,7 +577,11 @@ class Centro:
             self.pubblica(topic, json.dumps(c), True)
         for c in self.nostri():
             self.annuncia(c)
-        self.mq.subscribe(f"{BASE}/#")
+        # solo i comandi: il canale veloce (60 al secondo) non deve tornare qui
+        for s in (f"{BASE}/abbina", f"{BASE}/da_loco", f"{BASE}/+/+/set", f"{BASE}/+/vibra", f"{BASE}/+/spegni",
+                  f"{BASE}/+/dimentica"):
+            self.mq.subscribe(s)
+        self.pubblica(f"{BASE}/destinazione", self.destinazione(), True)
         self.pubblica(f"{BASE}/vivo", "online", True)
         self.stato("pronto")
 
@@ -516,6 +617,9 @@ class Centro:
 
     def comando(self, topic: str, testo: str) -> None:
         parti = topic.split("/")
+        if topic == f"{BASE}/da_loco":
+            self.dice_loco(testo)
+            return
         if topic == f"{BASE}/abbina" and testo == "si":
             if os.environ.get("CONTROLLER_DIAGNOSI") == "true":
                 threading.Thread(target=diagnosi_bluetooth, daemon=True).start()
@@ -759,6 +863,10 @@ class Centro:
         detto: set[tuple[str, str]] = set()
         connesso_da: dict[str, float] = {}
         while True:
+            try:
+                self.loco_tace()
+            except Exception as e:  # noqa: BLE001
+                scrivi(f"loco_tace: {e}")
             for c in list(self.nostri()):
                 mac = c["mac"]
                 if mac in self.sessioni:

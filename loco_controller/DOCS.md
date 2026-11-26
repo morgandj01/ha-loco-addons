@@ -34,3 +34,10 @@ controller col Bluetooth non vanno da nessuna parte fuori dalla PS5.
 
 `diagnosi`: scrive nel registro il traffico Bluetooth vero (btmon) all'avvio e a ogni abbinamento. Per questo l'add-on
 chiede NET_ADMIN e NET_RAW; quando i controller vanno si spegne e poi si toglie.
+
+## Con LOCO (ADR 0221)
+Dalla 0.2.0 il controller è il telecomando di casa: l'add-on manda lo stato intero del controller su MQTT
+(`loco/controller/<dualsense>/veloce`, fuori dagli stati di HA) e LOCO (il ponte `loco-controller` su pc-01) lo porta
+allo schermo giusto. LOCO decide anche **luce e LED** (`loco/controller/da_loco`) e **dove va il controller**:
+`sensor.loco_controller_destinazione` = `appletv`, `loco`, `telecamere` o `windows`. L'automazione dell'Apple TV comanda
+solo con `appletv`. Se LOCO tace da 30 secondi torna tutto come prima: Apple TV e la luce scelta qui in HA.
