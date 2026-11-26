@@ -45,3 +45,13 @@ solo con `appletv`. Se LOCO tace da 30 secondi torna tutto come prima: Apple TV 
 ### Provare un colore (0.2.1)
 Per tarare i colori della barra di luce: `loco/controller/prova` con `{"luce": [r, g, b], "secondi": 60}` mette quel
 colore sopra a tutto (anche sopra a LOCO) per quei secondi, al massimo 10 minuti; `{"luce": null}` lo toglie subito
+
+### 0.2.2: stick, taratura, Nest
+- **Lo stick sinistro fa le frecce**: oltre il 55% accende il tasto Su, Giù, Sinistra o Destra (resta acceso fino al
+  35%), come le frecce vere: sensori, eventi e l'automazione dell'Apple TV non vedono la differenza
+- **Taratura dei colori**: `select.loco_controller_taratura_colore` sceglie uno dei 12 colori di LOCO e lo accende sul
+  controller per 10 minuti; `light.loco_controller_taratura_luce` lo cambia (si salva da solo in /data/taratura.json);
+  «Taratura ripristina» lo rimette come i segnapasso, «Taratura fine» spegne la prova. La tabella intera è negli
+  attributi di `sensor.loco_controller_taratura`
+- **Nest della cucina nel giro**: `switch.loco_controller_nest_nel_giro`, lo legge LOCO per il giro di Options
+- Le fusa: LOCO può chiedere un ronzio leggero (`vibra` nello stato che manda)

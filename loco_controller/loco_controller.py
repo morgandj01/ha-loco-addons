@@ -112,6 +112,20 @@ def grandezze(s: ds.Stato) -> dict[str, float]:
             "acc_z": round(s.accelerometro[2] / 8192, 2)}
 
 
+def frecce_stick(stick_sx: tuple, prima: frozenset) -> frozenset:
+    """Lo stick sinistro come le frecce (Morgan, 26 notte: «navigare nei menu dappertutto con l'analogico sinistro allo
+    stesso modo delle freccette»): la direzione più spinta, oltre il 55%; una già accesa resta fino al 35% (niente
+    tremolio a metà). Valgono come le frecce vere: sensori di HA, automazione dell'Apple TV, schermi"""
+    x, y = asse(stick_sx[0]), -asse(stick_sx[1])
+    if abs(x) >= abs(y):
+        d, v = ("destra" if x > 0 else "sinistra"), abs(x)
+    else:
+        d, v = ("su" if y > 0 else "giu"), abs(y)
+    if v >= 55 or (d in prima and v >= 35):
+        return frozenset({d})
+    return frozenset()
+
+
 class Limitatore:
     """Il controller manda centinaia di rapporti al secondo: in HA va un valore ogni `ogni` secondi al massimo e solo
     se è cambiato abbastanza (`soglia`), e l'ultimo valore arriva sempre (a riposo dopo un giro ci finisce)"""
@@ -198,6 +212,26 @@ def configurazioni(mac: str, numero: int) -> list[tuple[str, dict]]:
     return out
 
 
+# la taratura dei colori della barra di luce (Morgan, 26 notte: «creami su HA una dashboard [...] che mi fa calibrare
+# ogni colore e lo vedo direttamente sul controller»): i 12 colori di LOCO (timer e occhi), di partenza come i segnapasso
+# (loco-self world/segnapasso.yaml `colori_timer`). Scegli il colore, lo cambi dalla luce «Taratura», il controller lo
+# mostra subito; la tabella sta in /data e nel sensore «Taratura». LOCO la prende da lì (`colori_controller`)
+TARATURA_BASE = {"blu": "#0030ff", "azzurro": "#00b2ff", "ciano": "#00fffa", "verde": "#00ff30", "giallo": "#ffd000",
+                 "ambra": "#ffb600", "arancione": "#ff7826", "rosso": "#ff0008", "rosa": "#ff84bb",
+                 "magenta": "#ff00c0", "viola": "#c907ff", "bianco": "#ffffff"}
+NESSUNO = "nessuno"
+TARATURA_S = 600
+
+
+def hex_rgb(h: str) -> tuple[int, int, int]:
+    n = int(h[1:], 16)
+    return ((n >> 16) & 255, (n >> 8) & 255, n & 255)
+
+
+def rgb_hex(c) -> str:
+    return "#%02x%02x%02x" % tuple(max(0, min(255, int(v))) for v in c)
+
+
 def configurazioni_centro() -> list[tuple[str, dict]]:
     disp = {"identifiers": ["loco_controller"], "name": "LOCO controller", "manufacturer": "LOCO",
             "model": "Add-on di HA (ADR 0220)"}
@@ -216,6 +250,36 @@ def configurazioni_centro() -> list[tuple[str, dict]]:
          {"name": "Destinazione", "unique_id": "loco_controller_destinazione",
           "default_entity_id": "sensor.loco_controller_destinazione", "state_topic": f"{BASE}/destinazione",
           "device": disp, "availability": vivo, "icon": "mdi:target"}),
+        # il Nest della cucina nel giro di Options (Morgan: «mettimi un interruttore in HA che lo mette e toglie dal giro,
+        # non serve quasi mai»): lo legge il ponte loco-controller e lo dice al kernel
+        (f"{DISCOVERY}/switch/loco_controller/nest_giro/config",
+         {"name": "Nest della cucina nel giro", "unique_id": "loco_controller_nest_giro",
+          "default_entity_id": "switch.loco_controller_nest_nel_giro", "command_topic": f"{BASE}/nest_giro/set",
+          "state_topic": f"{BASE}/nest_giro", "payload_on": "si", "payload_off": "no", "device": disp,
+          "availability": vivo, "icon": "mdi:google-nest"}),
+        (f"{DISCOVERY}/select/loco_controller/taratura_colore/config",
+         {"name": "Taratura colore", "unique_id": "loco_controller_taratura_colore",
+          "default_entity_id": "select.loco_controller_taratura_colore", "command_topic": f"{BASE}/taratura/colore/set",
+          "state_topic": f"{BASE}/taratura/colore", "options": [NESSUNO, *TARATURA_BASE], "device": disp,
+          "availability": vivo, "icon": "mdi:palette"}),
+        (f"{DISCOVERY}/light/loco_controller/taratura_luce/config",
+         {"name": "Taratura luce", "unique_id": "loco_controller_taratura_luce",
+          "default_entity_id": "light.loco_controller_taratura_luce", "schema": "json",
+          "command_topic": f"{BASE}/taratura/luce/set", "state_topic": f"{BASE}/taratura/luce",
+          "supported_color_modes": ["rgb"], "brightness": False, "device": disp, "availability": vivo,
+          "icon": "mdi:palette-swatch"}),
+        (f"{DISCOVERY}/sensor/loco_controller/taratura/config",
+         {"name": "Taratura", "unique_id": "loco_controller_taratura", "default_entity_id": "sensor.loco_controller_taratura",
+          "state_topic": f"{BASE}/taratura/stato", "json_attributes_topic": f"{BASE}/taratura/tabella",
+          "device": disp, "availability": vivo, "icon": "mdi:palette-advanced"}),
+        (f"{DISCOVERY}/button/loco_controller/taratura_ripristina/config",
+         {"name": "Taratura ripristina", "unique_id": "loco_controller_taratura_ripristina",
+          "default_entity_id": "button.loco_controller_taratura_ripristina", "command_topic": f"{BASE}/taratura/ripristina",
+          "payload_press": "si", "device": disp, "availability": vivo, "icon": "mdi:restore"}),
+        (f"{DISCOVERY}/button/loco_controller/taratura_fine/config",
+         {"name": "Taratura fine", "unique_id": "loco_controller_taratura_fine",
+          "default_entity_id": "button.loco_controller_taratura_fine", "command_topic": f"{BASE}/taratura/fine",
+          "payload_press": "si", "device": disp, "availability": vivo, "icon": "mdi:check-bold"}),
     ]
 
 
@@ -315,6 +379,8 @@ class Sessione:
         self.vivo = True
         self.chiuso = False
         self.ultimo: ds.Stato | None = None
+        self.frecce: frozenset = frozenset()          # le frecce che fa lo stick sinistro adesso
+        self.premuti: frozenset | None = None         # i tasti veri più le frecce dello stick
         self.veloce_t = 0.0
         self.veloce_ultimo: dict | None = None
         self.usato = time.time()                          # l'ultima volta che qualcuno l'ha toccato
@@ -354,6 +420,14 @@ class Sessione:
         self.feature(0x09, "abbinamento")
         self.chiedi_calibrazione()
         self.feature(0x20, "firmware")
+
+    def vibra_piano(self, ms: int) -> None:
+        """Il ronzio delle fusa (LOCO accarezzato dal touchpad, 26 notte): solo il motore leggero, piano"""
+        def giro():
+            self.manda(vibra=(70, 0))
+            time.sleep(max(0.05, min(1.0, ms / 1000)))
+            self.manda(vibra=(0, 0))
+        threading.Thread(target=giro, daemon=True).start()
 
     def vibra(self, forte: bool) -> None:
         def giro():
@@ -429,13 +503,16 @@ class Sessione:
             self.usato = adesso
         t = f"{BASE}/{self.o}"
         prima = self.ultimo
-        for k, giu in tasti_cambiati(prima.premuti if prima else frozenset(), s.premuti).items():
+        self.frecce = frecce_stick(s.stick_sx, self.frecce)
+        premuti = s.premuti | self.frecce
+        for k, giu in tasti_cambiati(self.premuti or frozenset(), premuti).items():
             self.c.pubblica(f"{t}/tasto/{k}", "si" if giu else "no", True)       # prima dei sensori lenti
         if prima is None:                                 # all'arrivo: tutti gli altri lasciati
             for k in ds.TUTTI_I_TASTI:
-                if k not in s.premuti:
+                if k not in premuti:
                     self.c.pubblica(f"{t}/tasto/{k}", "no", True)
-        for ev in self.tastiera.passa(s.premuti, adesso):
+        self.premuti = premuti
+        for ev in self.tastiera.passa(premuti, adesso):
             self.c.pubblica(f"{t}/tasti", json.dumps({"event_type": ev}), False)
         if prima is None or (s.batteria, s.in_carica, s.carica_piena) != (prima.batteria, prima.in_carica, prima.carica_piena):
             self.c.pubblica(f"{t}/batteria", str(s.batteria), True)
@@ -483,6 +560,66 @@ class Centro:
         self.da_loco: dict = {}                           # l'ultimo stato mandato da LOCO (luce, LED, destinazione)
         self.da_loco_t = 0.0
         self.prova: tuple | None = None                   # (rgb, scade): un colore da provare, sopra a tutto (taratura)
+        self.taratura_scelto = NESSUNO
+        self.taratura: dict[str, str] = dict(TARATURA_BASE)
+        try:
+            for k, v in json.loads((dati / "taratura.json").read_text()).items():
+                if k in TARATURA_BASE and isinstance(v, str) and len(v) == 7 and v.startswith("#"):
+                    self.taratura[k] = v.lower()
+        except (OSError, ValueError, AttributeError):
+            pass
+        self.nest_giro = (self.cfg.get("nest_giro") is True)
+
+    # la taratura dei colori e il Nest nel giro (26 notte)
+    def pubblica_taratura(self) -> None:
+        diversi = [k for k, v in self.taratura.items() if v != TARATURA_BASE[k]]
+        self.pubblica(f"{BASE}/taratura/colore", self.taratura_scelto, True)
+        self.pubblica(f"{BASE}/taratura/tabella", json.dumps({**self.taratura, "cambiati": diversi}), True)
+        self.pubblica(f"{BASE}/taratura/stato", f"{len(diversi)} cambiati" if diversi else "come i segnapasso", True)
+        if self.taratura_scelto in self.taratura:
+            r, g, b = hex_rgb(self.taratura[self.taratura_scelto])
+            self.pubblica(f"{BASE}/taratura/luce", json.dumps({"state": "ON", "color_mode": "rgb",
+                                                                 "color": {"r": r, "g": g, "b": b}}), True)
+        else:
+            self.pubblica(f"{BASE}/taratura/luce", json.dumps({"state": "OFF"}), True)
+        self.pubblica(f"{BASE}/nest_giro", "si" if self.nest_giro else "no", True)
+
+    def taratura_mostra(self) -> None:
+        """Il colore scelto sulla barra di luce, sopra a tutto, per 10 minuti (o niente)"""
+        prima = {c["mac"]: self.voluto(c["mac"]) for c in self.nostri()}
+        self.prova = ((hex_rgb(self.taratura[self.taratura_scelto]), time.time() + TARATURA_S)
+                      if self.taratura_scelto in self.taratura else None)
+        self.applica_loco(self.destinazione(), prima)
+
+    def tara(self, cosa: str, testo: str) -> None:
+        if cosa == "colore/set" and (testo == NESSUNO or testo in self.taratura):
+            self.taratura_scelto = testo
+        elif cosa == "luce/set" and self.taratura_scelto in self.taratura:
+            try:
+                d = json.loads(testo)
+            except ValueError:
+                return
+            col = d.get("color") if isinstance(d, dict) else None
+            if d.get("state") == "OFF":
+                self.taratura_scelto = NESSUNO
+            elif isinstance(col, dict) and all(isinstance(col.get(x), (int, float)) for x in "rgb"):
+                self.taratura[self.taratura_scelto] = rgb_hex((col["r"], col["g"], col["b"]))
+                self.salva_taratura()
+        elif cosa == "ripristina" and self.taratura_scelto in self.taratura:
+            self.taratura[self.taratura_scelto] = TARATURA_BASE[self.taratura_scelto]
+            self.salva_taratura()
+        elif cosa == "fine":
+            self.taratura_scelto = NESSUNO
+        else:
+            return
+        self.taratura_mostra()
+        self.pubblica_taratura()
+
+    def salva_taratura(self) -> None:
+        f = self.dati / "taratura.json"
+        tmp = f.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.taratura, indent=1))
+        tmp.replace(f)
 
     # stato salvato
     def salva(self) -> None:
@@ -550,6 +687,10 @@ class Centro:
         if not isinstance(d, dict):
             return
         prima_dest, prima = self.destinazione(), {c["mac"]: self.voluto(c["mac"]) for c in self.nostri()}
+        vb = d.get("vibra") if isinstance(d.get("vibra"), dict) else None
+        if vb and vb.get("id") != (self.da_loco.get("vibra") or {}).get("id") and self.da_loco:
+            for s in list(self.sessioni.values()):        # una volta per ogni richiesta nuova (lo stato si ripete ogni 2 s)
+                s.vibra_piano(int(vb.get("ms") or 200))
         self.da_loco, self.da_loco_t = d, time.time()
         self.applica_loco(prima_dest, prima)
 
@@ -570,6 +711,9 @@ class Centro:
         if self.prova and time.time() >= self.prova[1]:
             self.prova = None
             scrivi("prova colore finita")
+            if self.taratura_scelto != NESSUNO:
+                self.taratura_scelto = NESSUNO
+                self.pubblica_taratura()
             for c in self.nostri():
                 self.pubblica_voluto(c["mac"])
                 sess = self.sessioni.get(c["mac"])
@@ -610,10 +754,13 @@ class Centro:
         for c in self.nostri():
             self.annuncia(c)
         # solo i comandi: il canale veloce (60 al secondo) non deve tornare qui
-        for s in (f"{BASE}/abbina", f"{BASE}/da_loco", f"{BASE}/prova", f"{BASE}/+/+/set", f"{BASE}/+/vibra", f"{BASE}/+/spegni",
+        for s in (f"{BASE}/abbina", f"{BASE}/da_loco", f"{BASE}/prova", f"{BASE}/taratura/colore/set",
+                  f"{BASE}/taratura/luce/set", f"{BASE}/taratura/ripristina", f"{BASE}/taratura/fine", f"{BASE}/nest_giro/set",
+                  f"{BASE}/+/+/set", f"{BASE}/+/vibra", f"{BASE}/+/spegni",
                   f"{BASE}/+/dimentica"):
             self.mq.subscribe(s)
         self.pubblica(f"{BASE}/destinazione", self.destinazione(), True)
+        self.pubblica_taratura()
         self.pubblica(f"{BASE}/vivo", "online", True)
         self.stato("pronto")
 
@@ -654,6 +801,15 @@ class Centro:
             return
         if topic == f"{BASE}/prova":
             self.prova_colore(testo)
+            return
+        if topic.startswith(f"{BASE}/taratura/"):
+            self.tara(topic[len(f"{BASE}/taratura/"):], testo)
+            return
+        if topic == f"{BASE}/nest_giro/set" and testo in ("si", "no"):
+            self.nest_giro = testo == "si"
+            self.cfg["nest_giro"] = self.nest_giro
+            self.salva()
+            self.pubblica(f"{BASE}/nest_giro", testo, True)
             return
         if topic == f"{BASE}/abbina" and testo == "si":
             if os.environ.get("CONTROLLER_DIAGNOSI") == "true":
