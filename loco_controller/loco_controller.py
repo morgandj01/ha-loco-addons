@@ -242,7 +242,7 @@ class Sessione:
         self.seq = 0
         self.lock = threading.Lock()
         self.tastiera = Tastiera()
-        self.lento = Limitatore(0.5, 3)
+        self.lento = Limitatore(0.1, 2)              # dieci valori al secondo quando si muove, niente da fermo
         self.vivo = True
         self.chiuso = False
         self.ultimo: ds.Stato | None = None

@@ -18,7 +18,7 @@ controller col Bluetooth non vanno da nessuna parte fuori dalla PS5.
   `r2`, `l3`, `r3`, `create`, `options`, `ps`, `touchpad`, `microfono`, `su`, `giu`, `sinistra`, `destra`) e il suo
   `_lungo` quando lo tieni premuto 0,8 secondi
 - **Batteria**, **In carica**, **Collegato**, **Cuffie**, **Microfono spento**
-- **Stick** (-100…100, su positivo) e **grilletti** (0…100): al massimo due valori al secondo
+- **Stick** (-100…100, su positivo) e **grilletti** (0…100): fino a dieci valori al secondo mentre si muovono, niente da fermi
 - **Giroscopio** e **accelerometro**: spenti di base, si accendono dall'entità
 - **Luce** (colore e luminosità), **LED giocatore** (spenti, 1…5), **LED microfono**
 - **Grilletto L2** e **Grilletto R2** (i grilletti adattivi): libero, duro, molla, pistola (duro in mezzo e poi scatta),
