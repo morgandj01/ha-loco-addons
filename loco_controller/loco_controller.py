@@ -65,6 +65,18 @@ class Tastiera:
         return eventi
 
 
+# i nomi in HA dei sensori dei tasti (uno per tasto: acceso finché lo tieni premuto)
+NOMI_TASTI = {"croce": "Croce", "cerchio": "Cerchio", "quadrato": "Quadrato", "triangolo": "Triangolo",
+              "l1": "L1", "r1": "R1", "l2": "L2", "r2": "R2", "l3": "L3 (stick sinistro)", "r3": "R3 (stick destro)",
+              "create": "Create", "options": "Options", "ps": "PS", "touchpad": "Touchpad", "microfono": "Microfono",
+              "su": "Su", "giu": "Giù", "sinistra": "Sinistra", "destra": "Destra"}
+
+
+def tasti_cambiati(prima: frozenset[str], adesso: frozenset[str]) -> dict[str, bool]:
+    """Solo i tasti che sono cambiati: premuto (True) o lasciato (False)"""
+    return {k: k in adesso for k in sorted(prima ^ adesso)}
+
+
 def tipi_di_evento() -> list[str]:
     return [t for t in ds.TUTTI_I_TASTI] + [f"{t}_lungo" for t in ds.TUTTI_I_TASTI]
 
@@ -157,6 +169,9 @@ def configurazioni(mac: str, numero: int) -> list[tuple[str, dict]]:
           icon="mdi:link-variant-off", entity_category="config", availability=[{"topic": f"{BASE}/vivo"}],
           availability_mode="any"),
     ]
+    for k in ds.TUTTI_I_TASTI:
+        out.append(e("binary_sensor", f"tasto_{k}", f"Tasto {NOMI_TASTI.get(k, k)}", state_topic=f"{t}/tasto/{k}",
+                     payload_on="si", payload_off="no", icon="mdi:gamepad-circle"))
     for k, nome, unita, acceso in (("stick_sx_x", "Stick sinistro X", "%", True), ("stick_sx_y", "Stick sinistro Y", "%", True),
                                    ("stick_dx_x", "Stick destro X", "%", True), ("stick_dx_y", "Stick destro Y", "%", True),
                                    ("l2", "Grilletto L2", "%", True), ("r2", "Grilletto R2", "%", True),
@@ -340,9 +355,15 @@ class Sessione:
 
     def passa(self, s: ds.Stato, adesso: float) -> None:
         t = f"{BASE}/{self.o}"
+        prima = self.ultimo
+        for k, giu in tasti_cambiati(prima.premuti if prima else frozenset(), s.premuti).items():
+            self.c.pubblica(f"{t}/tasto/{k}", "si" if giu else "no", True)       # prima dei sensori lenti
+        if prima is None:                                 # all'arrivo: tutti gli altri lasciati
+            for k in ds.TUTTI_I_TASTI:
+                if k not in s.premuti:
+                    self.c.pubblica(f"{t}/tasto/{k}", "no", True)
         for ev in self.tastiera.passa(s.premuti, adesso):
             self.c.pubblica(f"{t}/tasti", json.dumps({"event_type": ev}), False)
-        prima = self.ultimo
         if prima is None or (s.batteria, s.in_carica, s.carica_piena) != (prima.batteria, prima.in_carica, prima.carica_piena):
             self.c.pubblica(f"{t}/batteria", str(s.batteria), True)
             self.c.pubblica(f"{t}/in_carica", "si" if s.in_carica else "no", True)
@@ -744,6 +765,8 @@ class Centro:
                 return                                    # se n'è già aperta un'altra: quella vale
             del self.sessioni[mac]
         o = oggetto(mac)
+        for k in ds.TUTTI_I_TASTI:                        # staccato con un tasto giù: non resta «premuto» in HA
+            self.pubblica(f"{BASE}/{o}/tasto/{k}", "no", True)
         self.pubblica(f"{BASE}/{o}/collegato", "no", True)
         self.pubblica(f"{BASE}/{o}/vivo", "offline", True)
         scrivi(f"{mac} staccato")

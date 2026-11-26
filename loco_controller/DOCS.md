@@ -17,6 +17,9 @@ controller col Bluetooth non vanno da nessuna parte fuori dalla PS5.
 - **Tasti**: un'entità evento con un tipo per tasto (`croce`, `cerchio`, `quadrato`, `triangolo`, `l1`, `r1`, `l2`,
   `r2`, `l3`, `r3`, `create`, `options`, `ps`, `touchpad`, `microfono`, `su`, `giu`, `sinistra`, `destra`) e il suo
   `_lungo` quando lo tieni premuto 0,8 secondi
+- **Un sensore per tasto** (`binary_sensor.dualsense_N_tasto_croce`, `..._tasto_l1`…): acceso finché lo tieni
+  premuto, quindi si vedono due tasti insieme e ogni pressione, anche ripetuta in fretta. Per le automazioni sono
+  meglio dell'evento
 - **Batteria**, **In carica**, **Collegato**, **Cuffie**, **Microfono spento**
 - **Stick** (-100…100, su positivo) e **grilletti** (0…100): fino a dieci valori al secondo mentre si muovono, niente da fermi
 - **Giroscopio** e **accelerometro**: spenti di base, si accendono dall'entità
