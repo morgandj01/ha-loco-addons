@@ -146,6 +146,10 @@ def configurazioni(mac: str, numero: int) -> list[tuple[str, dict]]:
           options=list(NOMI_LED), icon="mdi:numeric"),
         e("switch", "led_microfono", "LED microfono", command_topic=f"{t}/led_microfono/set",
           state_topic=f"{t}/led_microfono", payload_on="si", payload_off="no", icon="mdi:microphone-message"),
+        e("select", "grilletto_sx", "Grilletto L2", command_topic=f"{t}/grilletto_sx/set",
+          state_topic=f"{t}/grilletto_sx", options=list(ds.GRILLETTO), icon="mdi:pistol"),
+        e("select", "grilletto_dx", "Grilletto R2", command_topic=f"{t}/grilletto_dx/set",
+          state_topic=f"{t}/grilletto_dx", options=list(ds.GRILLETTO), icon="mdi:pistol"),
         e("button", "vibra", "Vibra", command_topic=f"{t}/vibra", payload_press="corta", icon="mdi:vibrate"),
         e("button", "vibra_forte", "Vibra forte", command_topic=f"{t}/vibra", payload_press="forte",
           icon="mdi:vibrate"),
@@ -222,7 +226,8 @@ class Sessione:
         """Ogni pacchetto porta tutto quello che si vuole (luce, LED): cambiare una cosa non spegne le altre"""
         voluto = self.c.voluto(self.mac)
         u = grezzo or ds.Uscita(luce=rgb_vero(voluto["luce"]), giocatore=voluto["giocatore"],
-                                led_microfono=voluto["led_microfono"], **cosa)
+                                led_microfono=voluto["led_microfono"], grilletto_sx=voluto["grilletto_sx"],
+                                grilletto_dx=voluto["grilletto_dx"], **cosa)
         with self.lock:
             try:
                 self.dati.send(ds.scrivi(u, self.seq))
@@ -381,7 +386,8 @@ class Centro:
     def voluto(self, mac: str) -> dict:
         c = self.trova(mac) or {}
         return {"luce": c.get("luce") or {"acceso": True, "colore": AZZURRO, "luminosita": 255},
-                "giocatore": c.get("giocatore", c.get("numero", 1)), "led_microfono": bool(c.get("led_microfono"))}
+                "giocatore": c.get("giocatore", c.get("numero", 1)), "led_microfono": bool(c.get("led_microfono")),
+                "grilletto_sx": c.get("grilletto_sx", "libero"), "grilletto_dx": c.get("grilletto_dx", "libero")}
 
     # MQTT
     def avvia_mqtt(self) -> None:
@@ -435,10 +441,14 @@ class Centro:
                                                        "brightness": luce.get("luminosita", 255)}), True)
         self.pubblica(f"{BASE}/{o}/giocatore", NOMI_LED[max(0, min(5, int(v["giocatore"])))], True)
         self.pubblica(f"{BASE}/{o}/led_microfono", "si" if v["led_microfono"] else "no", True)
+        self.pubblica(f"{BASE}/{o}/grilletto_sx", v["grilletto_sx"], True)
+        self.pubblica(f"{BASE}/{o}/grilletto_dx", v["grilletto_dx"], True)
 
     def comando(self, topic: str, testo: str) -> None:
         parti = topic.split("/")
         if topic == f"{BASE}/abbina" and testo == "si":
+            if os.environ.get("CONTROLLER_DIAGNOSI") == "true":
+                threading.Thread(target=diagnosi_bluetooth, daemon=True).start()
             threading.Thread(target=self.abbina, daemon=True).start()
             return
         if len(parti) < 4 or parti[2] == "vivo":
@@ -454,6 +464,8 @@ class Centro:
                 return
         elif cosa == "giocatore" and parti[-1] == "set" and testo in NOMI_LED:
             c["giocatore"] = NOMI_LED.index(testo)
+        elif cosa in ("grilletto_sx", "grilletto_dx") and parti[-1] == "set" and testo in ds.GRILLETTO:
+            c[cosa] = testo
         elif cosa == "led_microfono" and parti[-1] == "set" and testo in ("si", "no"):
             c["led_microfono"] = testo == "si"
         elif cosa == "vibra" and testo in ("corta", "forte"):
@@ -747,6 +759,38 @@ class Centro:
         scrivi(f"{mac} staccato")
 
 
+def diagnosi_bluetooth(secondi: float = 120, righe: int = 600) -> None:
+    """Il traffico Bluetooth vero (btmon) nel registro, per capire cosa arriva dal controller: solo le righe che
+    contano (collegamenti, canali L2CAP, dati in arrivo) e solo per un po'. Serve l'opzione `diagnosi`"""
+    import subprocess
+    try:
+        pr = subprocess.Popen(["btmon", "-T"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                              errors="replace")
+    except OSError as e:
+        scrivi(f"diagnosi: btmon non parte ({e})")
+        return
+    fino, n = time.time() + secondi, 0
+    chiave = ("Connection Request", "Connect Complete", "Disconnect", "Encryption Change", "Link Key",
+              "L2CAP: Connection", "L2CAP: Configure", "L2CAP: Disconnection", "ACL Data RX", "ACL Data TX",
+              "Reject", "Authentication", "PSM", "Status:", "Reason:", "Result:", "Channel:", "HIDP")
+    acl_rx = 0
+    try:
+        for riga in pr.stdout:
+            if time.time() > fino or n >= righe:
+                break
+            r = riga.rstrip()
+            if "ACL Data RX" in r:
+                acl_rx += 1
+            if acl_rx > 40 and ("ACL Data" in r or "Channel:" in r or "HIDP" in r):
+                continue
+            if any(k in r for k in chiave):
+                n += 1
+                print(f"[btmon] {r.strip()[:180]}", flush=True)
+    finally:
+        pr.kill()
+        scrivi(f"diagnosi finita: {acl_rx} pacchetti ACL in arrivo")
+
+
 def mqtt_da_supervisor() -> dict:
     """Host e credenziali di Mosquitto dal Supervisor (services: mqtt:need)"""
     tok = os.environ.get("SUPERVISOR_TOKEN", "")
@@ -763,6 +807,8 @@ def main() -> int:
     c.avvia_mqtt()
     for psm in (ds.PSM_CONTROLLO, ds.PSM_DATI):
         threading.Thread(target=c.ascolta, args=(psm,), daemon=True).start()
+    if os.environ.get("CONTROLLER_DIAGNOSI") == "true":          # anche all'avvio: si vede la riaccensione col PS
+        threading.Thread(target=diagnosi_bluetooth, args=(300,), daemon=True).start()
     from gi.repository import GLib
     GLib.MainLoop().run()
     return 0

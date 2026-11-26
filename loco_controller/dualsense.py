@@ -105,6 +105,8 @@ class Uscita:
     giocatore: int | None = None            # 0-5 (GIOCATORE)
     vibra: tuple[int, int] | None = None    # motore destro (leggero), sinistro (forte), 0-255
     led_microfono: bool | None = None
+    grilletto_sx: str | None = None         # un nome di GRILLETTO (L2)
+    grilletto_dx: str | None = None         # (R2)
     spegni_animazione: bool = False         # la prima volta: toglie l'animazione blu dell'accensione, come il driver
 
 
@@ -129,11 +131,28 @@ def scrivi(u: Uscita, seq: int) -> bytes:
     if u.giocatore is not None:
         r[c + 1] |= 0x10
         r[c + 43] = GIOCATORE.get(int(u.giocatore), 0)
+    for nome, flag, da in ((u.grilletto_dx, 0x04, 10), (u.grilletto_sx, 0x08, 21)):
+        if nome is not None and nome in GRILLETTO:
+            r[c + 0] |= flag                                    # valid_flag0: right/left trigger
+            e = GRILLETTO[nome]
+            r[c + da:c + da + 11] = e + bytes(11 - len(e))
     if u.spegni_animazione:
         r[c + 38] |= 0x02                   # valid_flag2: comando l'accensione della luce
         r[c + 41] = 0x02                    # DS_OUTPUT_LIGHTBAR_SETUP_LIGHT_OUT
     pacchetto = bytes((HIDP_DATI_USCITA,)) + bytes(r[:-4])
     return pacchetto + struct.pack("<I", zlib.crc32(pacchetto) & 0xFFFFFFFF)
+
+
+# I grilletti adattivi (i motorini dentro L2 e R2). I modi «semplici», gli stessi che usano DS4Windows, DSX e la
+# libreria di Nielk1 (TriggerEffectGenerator): 11 byte per grilletto, il primo è il modo
+GRILLETTO = {
+    "libero": bytes((0x05,)),                                   # niente effetto
+    "duro": bytes((0x01, 0x00, 0xFF)),                          # resistenza piena da subito (posizione, forza)
+    "molla": bytes((0x01, 0x40, 0x60)),                         # resistenza dolce da un terzo della corsa
+    "pistola": bytes((0x02, 0x40, 0x90, 0xFF)),                 # duro in mezzo e poi «scatta» (inizio, fine, forza)
+    "mitraglietta": bytes((0x06, 0x0A, 0xFF, 0x20)),            # vibra a 10 Hz mentre lo tieni (frequenza, ampiezza, da dove)
+    "mitragliatrice": bytes((0x06, 0x1E, 0xFF, 0x10)),          # la stessa più veloce, 30 Hz
+}
 
 
 def e_un_dualsense(nome: str = "", modalias: str = "") -> bool:
