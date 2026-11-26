@@ -482,6 +482,7 @@ class Centro:
         self.scheda = ""
         self.da_loco: dict = {}                           # l'ultimo stato mandato da LOCO (luce, LED, destinazione)
         self.da_loco_t = 0.0
+        self.prova: tuple | None = None                   # (rgb, scade): un colore da provare, sopra a tutto (taratura)
 
     # stato salvato
     def salva(self) -> None:
@@ -506,10 +507,33 @@ class Centro:
                 "riposo": c.get("riposo", RIPOSO_DI_BASE), **self.loco_vuole()}
 
     def loco_vuole(self) -> dict:
-        """Luce, LED del giocatore e del microfono decisi da LOCO (ADR 0221), finché LOCO si fa sentire"""
-        if not self.da_loco or time.time() - self.da_loco_t > DA_LOCO_SCADE_S:
-            return {}
-        return luce_da_loco(self.da_loco.get("controller") or {}) or {}
+        """Luce, LED del giocatore e del microfono decisi da LOCO (ADR 0221), finché LOCO si fa sentire; sopra, il
+        colore da provare (`loco/controller/prova`, per tarare i colori guardando il controller)"""
+        v = {}
+        if self.da_loco and time.time() - self.da_loco_t <= DA_LOCO_SCADE_S:
+            v = luce_da_loco(self.da_loco.get("controller") or {}) or {}
+        if self.prova and time.time() < self.prova[1]:
+            v = {**v, "luce": {"acceso": True, "colore": self.prova[0], "luminosita": 255}}
+        return v
+
+    def prova_colore(self, testo: str) -> None:
+        """{"luce": [r, g, b], "secondi": n} (al massimo 10 minuti), {"luce": null} la toglie"""
+        try:
+            d = json.loads(testo)
+        except ValueError:
+            return
+        if not isinstance(d, dict):
+            return
+        prima = {c["mac"]: self.voluto(c["mac"]) for c in self.nostri()}
+        luce = d.get("luce")
+        if isinstance(luce, list) and len(luce) == 3 and all(isinstance(x, int) for x in luce):
+            sec = d.get("secondi", 60)
+            sec = max(1.0, min(600.0, float(sec))) if isinstance(sec, (int, float)) else 60.0
+            self.prova = (tuple(max(0, min(255, x)) for x in luce), time.time() + sec)
+            scrivi(f"prova colore {self.prova[0]} per {sec:.0f} s")
+        else:
+            self.prova = None
+        self.applica_loco(self.destinazione(), prima)
 
     def destinazione(self) -> str:
         if not self.da_loco or time.time() - self.da_loco_t > DA_LOCO_SCADE_S:
@@ -543,6 +567,14 @@ class Centro:
 
     def loco_tace(self) -> None:
         """Da sorveglia: LOCO non si fa sentire da DA_LOCO_SCADE_S, si torna come se non ci fosse (una volta)"""
+        if self.prova and time.time() >= self.prova[1]:
+            self.prova = None
+            scrivi("prova colore finita")
+            for c in self.nostri():
+                self.pubblica_voluto(c["mac"])
+                sess = self.sessioni.get(c["mac"])
+                if sess:
+                    sess.manda()
         if self.da_loco and time.time() - self.da_loco_t > DA_LOCO_SCADE_S:
             prima = {c["mac"]: luce_da_loco(self.da_loco.get("controller") or {}) for c in self.nostri()}
             self.da_loco = {}
@@ -578,7 +610,7 @@ class Centro:
         for c in self.nostri():
             self.annuncia(c)
         # solo i comandi: il canale veloce (60 al secondo) non deve tornare qui
-        for s in (f"{BASE}/abbina", f"{BASE}/da_loco", f"{BASE}/+/+/set", f"{BASE}/+/vibra", f"{BASE}/+/spegni",
+        for s in (f"{BASE}/abbina", f"{BASE}/da_loco", f"{BASE}/prova", f"{BASE}/+/+/set", f"{BASE}/+/vibra", f"{BASE}/+/spegni",
                   f"{BASE}/+/dimentica"):
             self.mq.subscribe(s)
         self.pubblica(f"{BASE}/destinazione", self.destinazione(), True)
@@ -619,6 +651,9 @@ class Centro:
         parti = topic.split("/")
         if topic == f"{BASE}/da_loco":
             self.dice_loco(testo)
+            return
+        if topic == f"{BASE}/prova":
+            self.prova_colore(testo)
             return
         if topic == f"{BASE}/abbina" and testo == "si":
             if os.environ.get("CONTROLLER_DIAGNOSI") == "true":
