@@ -260,16 +260,27 @@ class Sessione:
                 scrivi(f"{self.mac}: non riesco a scrivere ({e})")
             self.seq = (self.seq + 1) % 16
 
-    def chiedi_calibrazione(self) -> None:
-        """Il rapporto «feature» 0x05: da lì il controller manda il rapporto pieno 0x31 (lo chiede bluetoothd per noi)"""
+    def feature(self, numero: int, nome: str) -> None:
+        """Un rapporto «feature» (lo chiede bluetoothd per noi sul canale di controllo)"""
         import fcntl
         buf = bytearray(64)
-        buf[0] = ds.CALIBRAZIONE
+        buf[0] = numero
         try:
             n = fcntl.ioctl(self.fd, hidiocgfeature(len(buf)), buf, True)
-            scrivi(f"{self.mac}: calibrazione letta ({n} byte)")
+            scrivi(f"{self.mac}: {nome} letto ({n} byte)")
         except OSError as e:
-            scrivi(f"{self.mac}: calibrazione non letta ({e})")
+            scrivi(f"{self.mac}: {nome} non letto ({e})")
+
+    def chiedi_calibrazione(self) -> None:
+        """Il rapporto 0x05: da lì il controller manda il rapporto pieno 0x31"""
+        self.feature(ds.CALIBRAZIONE, "calibrazione")
+
+    def presentati(self) -> None:
+        """Le tre domande che fa il driver di Linux appena il DualSense arriva, nello stesso ordine: abbinamento (0x09),
+        calibrazione (0x05), firmware (0x20)"""
+        self.feature(0x09, "abbinamento")
+        self.chiedi_calibrazione()
+        self.feature(0x20, "firmware")
 
     def vibra(self, forte: bool) -> None:
         def giro():
@@ -280,7 +291,7 @@ class Sessione:
 
     def avvia(self) -> None:
         threading.Thread(target=self.leggi, daemon=True).start()
-        self.chiedi_calibrazione()
+        self.presentati()
         self.manda(grezzo=ds.Uscita(spegni_animazione=True))   # via l'animazione dell'accensione, come il driver
         time.sleep(0.1)
         self.manda()                                      # poi la luce e il numero
@@ -299,6 +310,9 @@ class Sessione:
                     if fermo in (3, 10) and pieni == 0:
                         scrivi(f"{self.mac}: niente dopo {fermo} s ({visti} rapporti corti), richiedo la calibrazione")
                         threading.Thread(target=self.chiedi_calibrazione, daemon=True).start()
+                    if fermo == 20 and visti == 0:            # collegato e muto: lo sblocca solo una riaccensione
+                        self.c.stato(f"DualSense {self.c.numero(self.mac)} collegato ma muto: spegnilo (tieni PS "
+                                     f"10 secondi) e riaccendilo")
                     continue
                 p = os.read(self.fd, 128)
             except (OSError, ValueError) as e:            # il controller si è staccato: hidraw sparisce
@@ -750,6 +764,9 @@ def diagnosi_bluetooth(secondi: float = 120, righe: int = 600) -> None:
               "L2CAP: Connection", "L2CAP: Configure", "L2CAP: Disconnection", "ACL Data RX", "ACL Data TX",
               "Reject", "Authentication", "PSM", "Status:", "Reason:", "Result:", "Channel:", "HIDP")
     acl_rx = 0
+    entrata = True                          # l'ultima riga «ACL Data» era in arrivo (>) o in uscita (<)
+    conti: dict[str, int] = {}
+    ultimo_conto = time.time()
     try:
         for riga in pr.stdout:
             if time.time() > fino or n >= righe:
@@ -757,7 +774,18 @@ def diagnosi_bluetooth(secondi: float = 120, righe: int = 600) -> None:
             r = riga.rstrip()
             if "ACL Data RX" in r:
                 acl_rx += 1
-            if acl_rx > 40 and ("ACL Data" in r or "Channel:" in r or "HIDP" in r):
+                entrata = True
+            elif "ACL Data TX" in r:
+                entrata = False
+            m = re.search(r"Channel: (\d+) len (\d+)", r)
+            if m:                                         # i dati: si contano, non si scrivono uno per uno
+                k = f"{'arriva' if entrata else 'parte'} canale {m.group(1)} da {m.group(2)} byte"
+                conti[k] = conti.get(k, 0) + 1
+                if time.time() - ultimo_conto >= 5:
+                    print("[btmon] in 5 s: " + ", ".join(f"{v}× {k}" for k, v in sorted(conti.items())), flush=True)
+                    conti, ultimo_conto = {}, time.time()
+                continue
+            if "ACL Data" in r or r.strip() == "Status: Success (0x00)":
                 continue
             if any(k in r for k in chiave):
                 n += 1
