@@ -606,11 +606,24 @@ class SessioneSwitch(Sessione):
         self.detto: tuple | None = None               # (giocatore, home accesa) già mandati
         self.ignoti: frozenset = frozenset()
         self.semplici = 0
+        self.hidp = False                             # True: canali L2CAP aperti da noi, coi byte HIDP davanti
+        self.ctrl = None                              # il canale di controllo (va tenuto aperto)
+
+    def _scrivi(self, b: bytes) -> None:
+        os.write(self.fd, (bytes((ds.HIDP_DATI_USCITA,)) + b) if self.hidp else b)
+
+    def chiudi(self) -> None:
+        super().chiudi()
+        if self.ctrl is not None:
+            try:
+                self.ctrl.close()
+            except OSError:
+                pass
 
     def sotto(self, cmd: int, arg: bytes = b"", vib: bytes | None = None) -> None:
         with self.lock:
             try:
-                os.write(self.fd, sp.sottocomando(self.n, cmd, arg, vib))
+                self._scrivi(sp.sottocomando(self.n, cmd, arg, vib))
             except OSError as e:
                 scrivi(f"{self.mac}: non riesco a scrivere ({e})")
             self.n = (self.n + 1) % 16
@@ -639,12 +652,16 @@ class SessioneSwitch(Sessione):
             forza = max(int(v[0]), int(v[1])) / 255
             with self.lock:
                 try:
-                    os.write(self.fd, sp.solo_vibra(self.n, sp.vibra(forza, forza)))
+                    self._scrivi(sp.solo_vibra(self.n, sp.vibra(forza, forza)))
                 except OSError as e:
                     scrivi(f"{self.mac}: vibrazione non mandata ({e})")
                 self.n = (self.n + 1) % 16
 
     def decodifica(self, p: bytes) -> ds.Stato | None:
+        if self.hidp:
+            if not p or p[0] != ds.HIDP_DATI_ENTRATA:
+                return None
+            p = p[1:]
         g = sp.leggi(p)
         if g is None:
             return None
@@ -1262,9 +1279,49 @@ class Centro:
         self.stato(f"{nome_di(c)} dimenticato")
 
     # il controller collegato = il suo hidraw
+    def canali(self, mac: str) -> bool:
+        """I due canali HID aperti da noi, senza bluetoothd (come le prime versioni col DualSense): per il Pro
+        Controller quando bluetoothd non ci riesce («br-connection-create-socket»). Poi parla SessioneSwitch coi byte
+        HIDP davanti. Una volta collegato così il controller si ricorda di noi e le volte dopo arriva da solo"""
+        import socket
+        import struct
+
+        def presa():
+            x = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_SEQPACKET, socket.BTPROTO_L2CAP)
+            x.setsockopt(274, 4, struct.pack("BB", 2, 0))  # SOL_BLUETOOTH, BT_SECURITY: cifrato, come vuole l'HID
+            x.settimeout(10)
+            return x
+        ctrl = dati = None
+        try:
+            ctrl = presa()
+            ctrl.connect((mac, ds.PSM_CONTROLLO))
+            dati = presa()
+            dati.connect((mac, ds.PSM_DATI))
+        except OSError as e:
+            for x in (ctrl, dati):
+                if x is not None:
+                    x.close()
+            d = f"canali nostri: {e}"
+            if self.__dict__.setdefault("_canali_detto", {}).get(mac) != d:
+                self._canali_detto[mac] = d
+                scrivi(f"{mac}: {d}")
+            return False
+        dati.settimeout(None)
+        sess = SessioneSwitch(self, mac, os.dup(dati.fileno()), f"l2cap {mac}")
+        dati.close()
+        sess.hidp, sess.ctrl = True, ctrl
+        with self.lock:
+            self.sessioni[mac] = sess
+        scrivi(f"{mac} collegato coi canali nostri")
+        threading.Thread(target=sess.avvia, daemon=True).start()
+        return True
+
     def collega(self, mac: str) -> bool:
         """Apre noi i canali HID (Device1.Connect): il DualSense si collega da solo, il Pro Controller no (27 nov: il
-        Nebula abbinato, solo SDP, poi si è spento). Se è spento la chiamata fallisce in qualche secondo"""
+        Nebula abbinato, solo SDP, poi si è spento). Se è spento la chiamata fallisce in qualche secondo. Se bluetoothd
+        non ci riesce, i canali li apriamo noi"""
+        if self.tipo(mac) == "switch" and self.__dict__.get("_collega_detto", {}).get(mac, "").find("create-socket") >= 0:
+            return self.canali(mac)
         try:
             import dbus
             dbus.Interface(self.bus.get_object("org.bluez", self.dev_path(mac)), "org.bluez.Device1").Connect(timeout=15)
@@ -1280,6 +1337,8 @@ class Centro:
                 i = self.info(self.dev_path(mac))
                 scrivi(f"{mac}: non si collega ({detto}); servizi {[str(u)[:8] for u in i.get('UUIDs') or []]}, "
                        f"Connected={bool(i.get('Connected'))}")
+            if self.tipo(mac) == "switch":
+                return self.canali(mac)
             return False
 
     def richiama(self) -> None:
@@ -1296,7 +1355,7 @@ class Centro:
                     da.pop(mac, None)
                     continue
                 inizio = da.setdefault(mac, adesso)
-                passo = 20 if adesso - inizio < 600 else 60
+                passo = 20 if adesso - inizio < 600 else 120
                 if adesso - ultimo.get(mac, 0) < passo or bool(self.info(self.dev_path(mac)).get("Connected")):
                     continue
                 ultimo[mac] = adesso

@@ -1,5 +1,5 @@
 name: LOCO controller
-version: "0.3.3"
+version: "0.3.4"
 slug: loco_controller
 description: I DualSense e i controller per Switch in Home Assistant sulla stessa chiavetta Bluetooth dell'orologio (tasti, batteria, luce, LED, vibrazione)
 url: https://github.com/morgandj01/ha-loco-addons
