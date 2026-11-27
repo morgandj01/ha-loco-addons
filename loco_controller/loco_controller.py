@@ -1190,6 +1190,8 @@ class Centro:
                 self.salva()
             scrivi(f"{mac}: {tipo} ({i.get('Name')}, {i.get('Modalias')})")
             self.annuncia(c)
+            if tipo == "switch":
+                self.collega(mac)                         # il Pro Controller aspetta che i canali HID li apra chi l'ha abbinato
             for _ in range(200):                          # dopo l'abbinamento si collega lui (bluetoothd lo accoglie)
                 if mac in self.sessioni:
                     break
@@ -1260,6 +1262,42 @@ class Centro:
         self.stato(f"{nome_di(c)} dimenticato")
 
     # il controller collegato = il suo hidraw
+    def collega(self, mac: str) -> bool:
+        """Apre noi i canali HID (Device1.Connect): il DualSense si collega da solo, il Pro Controller no (27 nov: il
+        Nebula abbinato, solo SDP, poi si è spento). Se è spento la chiamata fallisce in qualche secondo"""
+        try:
+            import dbus
+            dbus.Interface(self.bus.get_object("org.bluez", self.dev_path(mac)), "org.bluez.Device1").Connect(timeout=15)
+            scrivi(f"{mac}: collegato da qui")
+            return True
+        except Exception as e:  # noqa: BLE001
+            nome = e.get_dbus_name() if hasattr(e, "get_dbus_name") else type(e).__name__
+            if "AlreadyConnected" in str(nome) or "InProgress" in str(nome):
+                return True
+            return False
+
+    def richiama(self) -> None:
+        """I controller per Switch non tornano da soli: finché uno nostro non è collegato lo si chiama, ogni 20 s nei
+        primi 10 minuti da quando s'è staccato (o dall'avvio), poi ogni minuto. Una chiamata a vuoto occupa la radio
+        pochi secondi: l'orologio, già collegato, non ne risente"""
+        da: dict[str, float] = {}
+        ultimo: dict[str, float] = {}
+        while True:
+            adesso = time.time()
+            for c in list(self.nostri()):
+                mac = c["mac"]
+                if c.get("tipo") != "switch" or mac in self.sessioni or time.time() < self.abbina_fino:
+                    da.pop(mac, None)
+                    continue
+                inizio = da.setdefault(mac, adesso)
+                passo = 20 if adesso - inizio < 600 else 60
+                if adesso - ultimo.get(mac, 0) < passo or bool(self.info(self.dev_path(mac)).get("Connected")):
+                    continue
+                ultimo[mac] = adesso
+                if self.collega(mac):
+                    da.pop(mac, None)
+            time.sleep(2)
+
     def sorveglia(self) -> None:
         """Ogni secondo: un nostro DualSense che ha il suo hidraw e non ha la sessione la apre. Se BlueZ lo dà collegato
         e l'hidraw non viene, lo si scrive una volta (con quello che serve a capire)"""
@@ -1382,6 +1420,7 @@ def main() -> int:
     c.avvia_dbus()
     c.avvia_mqtt()
     threading.Thread(target=c.sorveglia, daemon=True).start()
+    threading.Thread(target=c.richiama, daemon=True).start()
     if os.environ.get("CONTROLLER_DIAGNOSI") == "true":          # anche all'avvio: si vede la riaccensione col PS
         threading.Thread(target=diagnosi_bluetooth, args=(300,), daemon=True).start()
     from gi.repository import GLib
