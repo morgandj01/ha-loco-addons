@@ -1274,6 +1274,12 @@ class Centro:
             nome = e.get_dbus_name() if hasattr(e, "get_dbus_name") else type(e).__name__
             if "AlreadyConnected" in str(nome) or "InProgress" in str(nome):
                 return True
+            detto = f"{nome}: {e}"[:200]
+            if self.__dict__.setdefault("_collega_detto", {}).get(mac) != detto:
+                self._collega_detto[mac] = detto
+                i = self.info(self.dev_path(mac))
+                scrivi(f"{mac}: non si collega ({detto}); servizi {[str(u)[:8] for u in i.get('UUIDs') or []]}, "
+                       f"Connected={bool(i.get('Connected'))}")
             return False
 
     def richiama(self) -> None:
