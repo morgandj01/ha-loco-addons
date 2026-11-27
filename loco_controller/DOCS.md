@@ -56,3 +56,4 @@ colore sopra a tutto (anche sopra a LOCO) per quei secondi, al massimo 10 minuti
 - **Nest della cucina nel giro**: `switch.loco_controller_nest_nel_giro`, lo legge LOCO per il giro di Options
 - Le fusa: LOCO può chiedere un ronzio leggero (`vibra` nello stato che manda)
 - 0.2.3: il ronzio forte quando LOCO lo chiede (`vibra.forte`: il comando segreto giusto)
+- 0.2.4: `sensor.loco_controller_destinazione` ha l'attributo `schermo` (tv-soggiorno, nest-cucina, schermo-soggiorno) quando comanda LOCO

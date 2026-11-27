@@ -249,6 +249,8 @@ def configurazioni_centro() -> list[tuple[str, dict]]:
         (f"{DISCOVERY}/sensor/loco_controller/destinazione/config",
          {"name": "Destinazione", "unique_id": "loco_controller_destinazione",
           "default_entity_id": "sensor.loco_controller_destinazione", "state_topic": f"{BASE}/destinazione",
+          # quale schermo, quando comanda LOCO (27 nov: con LOCO sulla TV triangolo fa ricomparire l'Apple TV, sul Nest no)
+          "json_attributes_topic": f"{BASE}/destinazione/attributi",
           "device": disp, "availability": vivo, "icon": "mdi:target"}),
         # il Nest della cucina nel giro di Options (Morgan: «mettimi un interruttore in HA che lo mette e toglie dal giro,
         # non serve quasi mai»): lo legge il ponte loco-controller e lo dice al kernel
@@ -678,6 +680,15 @@ class Centro:
         d = self.da_loco.get("destinazione")
         return d if d in ("appletv", "loco", "telecamere", "windows") else "appletv"
 
+    def schermo(self) -> str:
+        """Lo schermo che il controller comanda quando la destinazione è LOCO o le telecamere, se no niente"""
+        s = self.da_loco.get("schermo") if self.destinazione() in ("loco", "telecamere") else None
+        return s if isinstance(s, str) and len(s) <= 40 else ""
+
+    def pubblica_destinazione(self) -> None:
+        self.pubblica(f"{BASE}/destinazione", self.destinazione(), True)
+        self.pubblica(f"{BASE}/destinazione/attributi", json.dumps({"schermo": self.schermo()}), True)
+
     def dice_loco(self, testo: str) -> None:
         """Lo stato che manda LOCO (il ponte loco-controller): si applica solo quello che cambia"""
         try:
@@ -687,6 +698,7 @@ class Centro:
         if not isinstance(d, dict):
             return
         prima_dest, prima = self.destinazione(), {c["mac"]: self.voluto(c["mac"]) for c in self.nostri()}
+        prima_sch = self.schermo()
         vb = d.get("vibra") if isinstance(d.get("vibra"), dict) else None
         if vb and vb.get("id") != (self.da_loco.get("vibra") or {}).get("id") and self.da_loco:
             for s in list(self.sessioni.values()):        # una volta per ogni richiesta nuova (lo stato si ripete ogni 2 s)
@@ -695,12 +707,14 @@ class Centro:
                 else:
                     s.vibra_piano(int(vb.get("ms") or 200))
         self.da_loco, self.da_loco_t = d, time.time()
+        if self.schermo() != prima_sch and self.destinazione() == prima_dest:
+            self.pubblica_destinazione()                  # stessa destinazione, schermo diverso (TV ↔ Nest)
         self.applica_loco(prima_dest, prima)
 
     def applica_loco(self, prima_dest: str, prima: dict) -> None:
         dest = self.destinazione()
         if dest != prima_dest:
-            self.pubblica(f"{BASE}/destinazione", dest, True)
+            self.pubblica_destinazione()
             scrivi(f"destinazione: {dest}")
         for c in self.nostri():
             if self.voluto(c["mac"]) != prima.get(c["mac"]):
@@ -726,7 +740,7 @@ class Centro:
             prima = {c["mac"]: luce_da_loco(self.da_loco.get("controller") or {}) for c in self.nostri()}
             self.da_loco = {}
             scrivi("LOCO tace da 30 s: luce e LED come in HA, il controller all'Apple TV")
-            self.pubblica(f"{BASE}/destinazione", "appletv", True)
+            self.pubblica_destinazione()
             for c in self.nostri():
                 if prima.get(c["mac"]):
                     self.pubblica_voluto(c["mac"])
@@ -762,7 +776,7 @@ class Centro:
                   f"{BASE}/+/+/set", f"{BASE}/+/vibra", f"{BASE}/+/spegni",
                   f"{BASE}/+/dimentica"):
             self.mq.subscribe(s)
-        self.pubblica(f"{BASE}/destinazione", self.destinazione(), True)
+        self.pubblica_destinazione()
         self.pubblica_taratura()
         self.pubblica(f"{BASE}/vivo", "online", True)
         self.stato("pronto")
