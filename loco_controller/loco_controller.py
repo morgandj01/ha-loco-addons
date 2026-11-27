@@ -1148,8 +1148,33 @@ class Centro:
                 mac = self.cerca(20) or mac
                 ad.StopDiscovery()
                 cercando = False
-            dev = dbus.Interface(self.bus.get_object("org.bluez", self.dev_path(mac)), "org.bluez.Device1")
-            dev.Pair(timeout=40)
+            prima_i = self.info(self.dev_path(mac))
+            scrivi(f"{mac}: si presenta come «{prima_i.get('Name')}», {prima_i.get('Modalias')}, classe "
+                   f"{hex(int(prima_i.get('Class') or 0))}")
+            # 27 nov (il Nebula): «Page Timeout» e «NoReply» al primo colpo. Si riprova fino a tre volte, ognuna dopo
+            # averlo rivisto nella ricerca (vuol dire che è ancora in abbinamento), e prima di riprovare si fida
+            # (Trusted): se è lui a cercare noi, bluetoothd lo lascia entrare
+            for tentativo in range(3):
+                try:
+                    self.proprieta(self.dev_path(mac), "org.bluez.Device1").Set("org.bluez.Device1", "Trusted",
+                                                                               dbus.Boolean(True))
+                    dev = dbus.Interface(self.bus.get_object("org.bluez", self.dev_path(mac)), "org.bluez.Device1")
+                    dev.Pair(timeout=60)
+                    break
+                except dbus.DBusException as e:
+                    if "AlreadyExists" in str(e.get_dbus_name()) or bool(self.info(self.dev_path(mac)).get("Paired")):
+                        break
+                    scrivi(f"{mac}: abbinamento {tentativo + 1} non riuscito ({e.get_dbus_name()})")
+                    if tentativo == 2 or time.time() > self.abbina_fino:
+                        raise
+                    self.stato(f"riprovo ({tentativo + 2} di 3): tienilo in abbinamento")
+                    ad.StartDiscovery()
+                    cercando = True
+                    rivisto = self.cerca(15, mac)
+                    ad.StopDiscovery()
+                    cercando = False
+                    if not rivisto:
+                        raise
             self.proprieta(self.dev_path(mac), "org.bluez.Device1").Set("org.bluez.Device1", "Trusted",
                                                                        dbus.Boolean(True))
             i = self.info(self.dev_path(mac))
@@ -1187,7 +1212,7 @@ class Centro:
                 scrivi(f"Pairable non rimesso com'era: {e}")
             self.abbina_fino = 0.0
 
-    def cerca(self, secondi: float) -> str | None:
+    def cerca(self, secondi: float, solo: str | None = None) -> str | None:
         import dbus
         om = dbus.Interface(self.bus.get_object("org.bluez", "/"), "org.freedesktop.DBus.ObjectManager")
         fino = time.time() + secondi
@@ -1198,6 +1223,7 @@ class Centro:
                     continue
                 mac = str(d.get("Address", "")).upper()
                 if MAC.match(mac) and d.get("RSSI") is not None and mac not in self.sessioni \
+                        and (solo is None or mac == solo) \
                         and tipo_da(str(d.get("Name", "")), str(d.get("Modalias", ""))):
                     return mac                            # visto adesso nella ricerca: è lui in abbinamento
             time.sleep(1)
