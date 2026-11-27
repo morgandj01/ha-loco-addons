@@ -57,3 +57,15 @@ colore sopra a tutto (anche sopra a LOCO) per quei secondi, al massimo 10 minuti
 - Le fusa: LOCO può chiedere un ronzio leggero (`vibra` nello stato che manda)
 - 0.2.3: il ronzio forte quando LOCO lo chiede (`vibra.forte`: il comando segreto giusto)
 - 0.2.4: `sensor.loco_controller_destinazione` ha l'attributo `schermo` (tv-soggiorno, nest-cucina, schermo-soggiorno) quando comanda LOCO
+
+### 0.3.0: più controller, ognuno il suo, e i controller per Switch (ADR 0224)
+- **Ognuno va dove lo manda il suo Options**: LOCO manda `mani` {n: destinazione, schermo, luce, LED, ronzio} e ogni
+  controller ha il suo `sensor.<controller>_destinazione` (`sensor.dualsense_2_destinazione`…). Quello generale
+  `sensor.loco_controller_destinazione` resta ed è il controller 1
+- **Controller per Switch** (il Pro Controller e quelli che si presentano come lui, come il DragonShock Nebula): si
+  abbinano con lo stesso pulsante (sul controller il tasto di abbinamento) e diventano **Controller Switch N**, con gli
+  stessi nomi dei tasti di LOCO: A = croce, B = cerchio, X = triangolo, Y = quadrato, L/R = L1/R1, ZL/ZR = L2/R2, − =
+  Create, + = Options, Home = PS, Cattura = microfono. LED del giocatore (i 4 sotto), vibrazione, la luce accende e
+  spegne il cerchio del tasto Home; niente barra di luce, touchpad, microfono e grilletti adattivi
+- Con `diagnosi` accesa scrive nel registro i bit del rapporto che un Pro Controller vero non usa: se i tasti di dietro
+  del Nebula mandano qualcosa, si vede lì

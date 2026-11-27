@@ -29,6 +29,7 @@ from urllib import request as _rq
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dualsense as ds  # noqa: E402
+import switchpro as sp  # noqa: E402
 
 MAC = re.compile(r"^[0-9A-F]{2}(:[0-9A-F]{2}){5}$")
 BASE = "loco/controller"
@@ -90,8 +91,13 @@ def tasti_cambiati(prima: frozenset[str], adesso: frozenset[str]) -> dict[str, b
     return {k: k in adesso for k in sorted(prima ^ adesso)}
 
 
-def tipi_di_evento() -> list[str]:
-    return [t for t in ds.TUTTI_I_TASTI] + [f"{t}_lungo" for t in ds.TUTTI_I_TASTI]
+def tasti_di(tipo: str = "dualsense") -> tuple[str, ...]:
+    return sp.TUTTI_I_TASTI if tipo == "switch" else ds.TUTTI_I_TASTI
+
+
+def tipi_di_evento(tipo: str = "dualsense") -> list[str]:
+    t = tasti_di(tipo)
+    return list(t) + [f"{x}_lungo" for x in t]
 
 
 def asse(v: int) -> int:
@@ -147,23 +153,46 @@ class Limitatore:
         return fuori
 
 
-def oggetto(mac: str) -> str:
-    return "dualsense_" + mac.replace(":", "").lower()
+# i tipi di controller (27 novembre, ADR 0224): il DualSense e i controller per Switch (il DragonShock Nebula di
+# Morgan) che si presentano come un Pro Controller di Nintendo. Nomi in HA e prefisso delle entità
+TIPI = {"dualsense": {"nome": "DualSense", "prefisso": "dualsense", "marca": "Sony", "modello": "DualSense"},
+        "switch": {"nome": "Controller Switch", "prefisso": "controller_switch", "marca": "Nintendo (o compatibile)",
+                   "modello": "Pro Controller"}}
 
 
-def configurazioni(mac: str, numero: int) -> list[tuple[str, dict]]:
+def tipo_da(nome: str = "", modalias: str = "") -> str | None:
+    """Che controller è, dal nome nella ricerca o dal modalias di BlueZ. None = non è dei nostri"""
+    if ds.e_un_dualsense(nome, modalias):
+        return "dualsense"
+    if sp.e_un_pro_controller(nome, modalias):
+        return "switch"
+    return None
+
+
+def oggetto(mac: str, tipo: str = "dualsense") -> str:
+    return ("switch_" if tipo == "switch" else "dualsense_") + mac.replace(":", "").lower()
+
+
+def nome_di(c: dict) -> str:
+    return f"{TIPI.get(c.get('tipo') or 'dualsense', TIPI['dualsense'])['nome']} {c.get('numero', '?')}"
+
+
+def configurazioni(mac: str, numero: int, tipo: str = "dualsense") -> list[tuple[str, dict]]:
     """Le entità MQTT discovery di un controller: (topic di configurazione, configurazione)"""
-    o = oggetto(mac)
+    o = oggetto(mac, tipo)
     t = f"{BASE}/{o}"
-    disp = {"identifiers": [o], "name": f"DualSense {numero}", "manufacturer": "Sony", "model": "DualSense",
+    ti = TIPI.get(tipo, TIPI["dualsense"])
+    sw = tipo == "switch"
+    disp = {"identifiers": [o], "name": f"{ti['nome']} {numero}", "manufacturer": ti["marca"], "model": ti["modello"],
             "connections": [["bluetooth", mac.lower()]], "via_device": "loco_controller"}
     vivo = [{"topic": f"{BASE}/vivo"}, {"topic": f"{t}/vivo"}]
 
-    def e(tipo: str, chiave: str, nome: str, **altro) -> tuple[str, dict]:
-        c = {"name": nome, "unique_id": f"{o}_{chiave}", "default_entity_id": f"{tipo}.dualsense_{numero}_{chiave}",
+    def e(tipo_e: str, chiave: str, nome: str, **altro) -> tuple[str, dict]:
+        c = {"name": nome, "unique_id": f"{o}_{chiave}",
+             "default_entity_id": f"{tipo_e}.{ti['prefisso']}_{numero}_{chiave}",
              "device": disp, "availability": vivo, "availability_mode": "all"}
         c.update(altro)
-        return f"{DISCOVERY}/{tipo}/{o}/{chiave}/config", c
+        return f"{DISCOVERY}/{tipo_e}/{o}/{chiave}/config", c
 
     out = [
         e("binary_sensor", "collegato", "Collegato", state_topic=f"{t}/collegato", device_class="connectivity",
@@ -176,7 +205,11 @@ def configurazioni(mac: str, numero: int) -> list[tuple[str, dict]]:
           payload_off="no", entity_category="diagnostic"),
         e("binary_sensor", "microfono_spento", "Microfono spento", state_topic=f"{t}/microfono_spento",
           payload_on="si", payload_off="no", icon="mdi:microphone-off"),
-        e("event", "tasti", "Tasti", state_topic=f"{t}/tasti", event_types=tipi_di_evento(), icon="mdi:gamepad-variant"),
+        e("event", "tasti", "Tasti", state_topic=f"{t}/tasti", event_types=tipi_di_evento(tipo),
+          icon="mdi:gamepad-variant"),
+        # 27 nov (ADR 0224): dove va questo controller, ognuno il suo (l'automazione dell'Apple TV guarda questo)
+        e("sensor", "destinazione", "Destinazione", state_topic=f"{t}/destinazione",
+          json_attributes_topic=f"{t}/destinazione/attributi", icon="mdi:target"),
         e("light", "luce", "Luce", schema="json", command_topic=f"{t}/luce/set", state_topic=f"{t}/luce",
           supported_color_modes=["rgb"], brightness=True, icon="mdi:led-strip"),
         e("select", "giocatore", "LED giocatore", command_topic=f"{t}/giocatore/set", state_topic=f"{t}/giocatore",
@@ -198,8 +231,13 @@ def configurazioni(mac: str, numero: int) -> list[tuple[str, dict]]:
           icon="mdi:link-variant-off", entity_category="config", availability=[{"topic": f"{BASE}/vivo"}],
           availability_mode="any"),
     ]
-    for k in ds.TUTTI_I_TASTI:
-        out.append(e("binary_sensor", f"tasto_{k}", f"Tasto {NOMI_TASTI.get(k, k)}", state_topic=f"{t}/tasto/{k}",
+    if sw:
+        # il Pro Controller non ha cuffie, microfono, LED del microfono né grilletti adattivi
+        via = {"cuffie", "microfono_spento", "led_microfono", "grilletto_sx", "grilletto_dx"}
+        out = [x for x in out if x[0].split("/")[-2] not in via]
+    nomi = sp.NOMI if sw else NOMI_TASTI
+    for k in tasti_di(tipo):
+        out.append(e("binary_sensor", f"tasto_{k}", f"Tasto {nomi.get(k, k)}", state_topic=f"{t}/tasto/{k}",
                      payload_on="si", payload_off="no", icon="mdi:gamepad-circle"))
     for k, nome, unita, acceso in (("stick_sx_x", "Stick sinistro X", "%", True), ("stick_sx_y", "Stick sinistro Y", "%", True),
                                    ("stick_dx_x", "Stick destro X", "%", True), ("stick_dx_y", "Stick destro Y", "%", True),
@@ -350,7 +388,7 @@ HIDRAW = Path("/sys/class/hidraw")
 
 
 def trova_hidraw(mac: str, radice: Path = HIDRAW) -> str | None:
-    """Il /dev/hidrawN di quel DualSense: bluetoothd mette l'indirizzo del controller in HID_UNIQ"""
+    """Il /dev/hidrawN di quel controller: bluetoothd mette l'indirizzo del controller in HID_UNIQ"""
     m = mac.lower()
     for d in sorted(radice.glob("hidraw*")):
         try:
@@ -359,7 +397,8 @@ def trova_hidraw(mac: str, radice: Path = HIDRAW) -> str | None:
             continue
         v = dict(r.split("=", 1) for r in ue.splitlines() if "=" in r)
         hid = v.get("HID_ID", "").upper()
-        if v.get("HID_UNIQ", "").strip().lower() == m and (":0000054C:00000CE6" in hid or ":0000054C:00000DF2" in hid):
+        if v.get("HID_UNIQ", "").strip().lower() == m and (":0000054C:00000CE6" in hid or ":0000054C:00000DF2" in hid
+                                                            or ":0000057E:00002009" in hid):
             return f"/dev/{d.name}"
     return None
 
@@ -373,7 +412,7 @@ class Sessione:
     """Un DualSense collegato: il suo hidraw, la lettura dei rapporti e le uscite"""
     def __init__(self, centro: "Centro", mac: str, fd: int, percorso: str = "") -> None:
         self.c, self.mac, self.fd, self.percorso = centro, mac, fd, percorso
-        self.o = oggetto(mac)
+        self.o = centro.ogg(mac)
         self.seq = 0
         self.lock = threading.Lock()
         self.tastiera = Tastiera()
@@ -457,12 +496,11 @@ class Sessione:
                 if not pronto:
                     fermo += 1
                     if fermo in (3, 10) and pieni == 0:
-                        scrivi(f"{self.mac}: niente dopo {fermo} s ({visti} rapporti corti), richiedo la calibrazione")
-                        threading.Thread(target=self.chiedi_calibrazione, daemon=True).start()
+                        scrivi(f"{self.mac}: niente dopo {fermo} s ({visti} rapporti corti), lo richiedo")
+                        threading.Thread(target=self.ritenta, daemon=True).start()
                     self.forse_a_riposo(time.time())
                     if fermo == 20 and visti == 0:            # collegato e muto: lo sblocca solo una riaccensione
-                        self.c.stato(f"DualSense {self.c.numero(self.mac)} collegato ma muto: spegnilo (tieni PS "
-                                     f"10 secondi) e riaccendilo")
+                        self.c.stato(f"{self.nome()} collegato ma muto: spegnilo e riaccendilo")
                     continue
                 p = os.read(self.fd, 128)
             except (OSError, ValueError) as e:            # il controller si è staccato: hidraw sparisce
@@ -475,18 +513,18 @@ class Sessione:
             visti += 1
             if visti <= 3 or visti in (100, 1000):
                 scrivi(f"{self.mac}: rapporto {visti}, {len(p)} byte ({p[:4].hex()})")
-            s = ds.leggi(bytes((ds.HIDP_DATI_ENTRATA,)) + p)  # il CRC conta anche l'intestazione 0xA1
+            s = self.decodifica(p)
             if s is None:
                 corti += 1
-                if corti in (250, 2500):                  # ancora il rapporto corto: la calibrazione non è arrivata
-                    threading.Thread(target=self.chiedi_calibrazione, daemon=True).start()
+                if corti in (250, 2500):                  # ancora il rapporto corto: la richiesta non è arrivata
+                    threading.Thread(target=self.ritenta, daemon=True).start()
                 continue
             corti = 0
             pieni += 1
             if pieni % 250 == 0:                          # circa una volta al secondo
                 self.forse_a_riposo(time.time())
             if pieni == 1:
-                self.c.stato(f"DualSense {self.c.numero(self.mac)} collegato")
+                self.c.stato(f"{self.nome()} collegato")
             self.passa(s, time.time())
         self.chiudi()
 
@@ -496,7 +534,7 @@ class Sessione:
         if not scelto or self.a_riposo or adesso - self.usato < scelto:
             return False
         self.a_riposo = True
-        self.c.stato(f"DualSense {self.c.numero(self.mac)} spento: fermo da {self.c.voluto(self.mac)['riposo']}")
+        self.c.stato(f"{self.nome()} spento: fermo da {self.c.voluto(self.mac)['riposo']}")
         threading.Thread(target=self.c.spegni, args=(self.mac,), daemon=True).start()
         return True
 
@@ -510,7 +548,7 @@ class Sessione:
         for k, giu in tasti_cambiati(self.premuti or frozenset(), premuti).items():
             self.c.pubblica(f"{t}/tasto/{k}", "si" if giu else "no", True)       # prima dei sensori lenti
         if prima is None:                                 # all'arrivo: tutti gli altri lasciati
-            for k in ds.TUTTI_I_TASTI:
+            for k in self.tasti:
                 if k not in premuti:
                     self.c.pubblica(f"{t}/tasto/{k}", "no", True)
         self.premuti = premuti
@@ -531,6 +569,18 @@ class Sessione:
             self.c.pubblica(f"{t}/veloce", json.dumps(v, separators=(",", ":")), False)
         self.ultimo = s
 
+    # --- quello che cambia da un tipo di controller all'altro (il DualSense qui, il Pro Controller sotto)
+    tasti = ds.TUTTI_I_TASTI
+
+    def nome(self) -> str:
+        return nome_di(self.c.trova(self.mac) or {})
+
+    def decodifica(self, p: bytes) -> ds.Stato | None:
+        return ds.leggi(bytes((ds.HIDP_DATI_ENTRATA,)) + p)  # il CRC conta anche l'intestazione 0xA1
+
+    def ritenta(self) -> None:
+        self.chiedi_calibrazione()
+
     def chiudi(self) -> None:
         if self.chiuso:
             return
@@ -541,6 +591,84 @@ class Sessione:
         except OSError:
             pass
         self.c.staccato(self.mac, self)
+
+
+class SessioneSwitch(Sessione):
+    """Un controller per Switch (il Pro Controller e chi si presenta come lui, ADR 0224): stessi eventi, stesse entità
+    e stesso canale veloce del DualSense, con i nomi dei tasti di LOCO (switchpro.py). Niente barra di luce: la luce
+    accende o spegne il cerchio del tasto Home; i LED del giocatore sono i 4 sotto; la vibrazione è la HD rumble"""
+    tasti = sp.TUTTI_I_TASTI
+
+    def __init__(self, *a, **k) -> None:
+        super().__init__(*a, **k)
+        self.n = 0
+        self.stick = (sp.Stick(), sp.Stick())
+        self.detto: tuple | None = None               # (giocatore, home accesa) già mandati
+        self.ignoti: frozenset = frozenset()
+        self.semplici = 0
+
+    def sotto(self, cmd: int, arg: bytes = b"", vib: bytes | None = None) -> None:
+        with self.lock:
+            try:
+                os.write(self.fd, sp.sottocomando(self.n, cmd, arg, vib))
+            except OSError as e:
+                scrivi(f"{self.mac}: non riesco a scrivere ({e})")
+            self.n = (self.n + 1) % 16
+        time.sleep(0.05)                              # il controller risponde a uno per volta
+
+    def presentati(self) -> None:
+        for cmd, arg in sp.avvio():
+            self.sotto(cmd, arg)
+
+    def ritenta(self) -> None:
+        self.presentati()
+        self.detto = None
+        self.manda()
+
+    def manda(self, grezzo=None, **cosa) -> None:
+        if grezzo is not None:                        # l'animazione dell'accensione del DualSense: qui non c'è
+            return
+        voluto = self.c.voluto(self.mac)
+        ora = (int(voluto["giocatore"]), any(rgb_vero(voluto["luce"])))
+        if ora != self.detto:
+            self.detto = ora
+            self.sotto(sp.LED_GIOCATORE, sp.led_giocatore(ora[0]))
+            self.sotto(sp.LUCE_HOME, sp.luce_home(ora[1]))
+        v = cosa.get("vibra")
+        if v is not None:
+            forza = max(int(v[0]), int(v[1])) / 255
+            with self.lock:
+                try:
+                    os.write(self.fd, sp.solo_vibra(self.n, sp.vibra(forza, forza)))
+                except OSError as e:
+                    scrivi(f"{self.mac}: vibrazione non mandata ({e})")
+                self.n = (self.n + 1) % 16
+
+    def decodifica(self, p: bytes) -> ds.Stato | None:
+        g = sp.leggi(p)
+        if g is None:
+            return None
+        if g.semplice:
+            self.semplici += 1
+            if self.semplici in (120, 1200):          # ancora il rapporto semplice: il modo pieno non è arrivato
+                threading.Thread(target=self.ritenta, daemon=True).start()
+        if g.ignoti != self.ignoti:
+            # i tasti di dietro del Nebula (Morgan: «nessun software è riuscito a usarli»): se mandano qualcosa, è qui
+            if g.ignoti and os.environ.get("CONTROLLER_DIAGNOSI") == "true":
+                scrivi(f"{self.mac}: bit sconosciuti accesi: {', '.join(sorted(g.ignoti))} (rapporto {p[:13].hex()})")
+            self.ignoti = g.ignoti
+        return ds.Stato(stick_sx=self.stick[0].a_otto_bit(g.stick_sx), stick_dx=self.stick[1].a_otto_bit(g.stick_dx),
+                        l2=255 if "l2" in g.premuti else 0, r2=255 if "r2" in g.premuti else 0, premuti=g.premuti,
+                        giroscopio=tuple(round(v * 62.4) for v in g.giroscopio),   # come il DualSense: 1024 = 1 °/s
+                        accelerometro=tuple(v * 2 for v in g.accelerometro),       # 8192 = 1 g
+                        batteria=g.batteria, in_carica=g.in_carica, carica_piena=g.batteria == 100 and g.in_carica)
+
+    def vibra_piano(self, ms: int) -> None:
+        def giro():
+            self.manda(vibra=(90, 0))
+            time.sleep(max(0.05, min(1.0, ms / 1000)))
+            self.manda(vibra=(0, 0))
+        threading.Thread(target=giro, daemon=True).start()
 
 
 # --- il centro: Bluetooth, MQTT, stato ----------------------------------------------------------------------------
@@ -588,10 +716,10 @@ class Centro:
 
     def taratura_mostra(self) -> None:
         """Il colore scelto sulla barra di luce, sopra a tutto, per 10 minuti (o niente)"""
-        prima = {c["mac"]: self.voluto(c["mac"]) for c in self.nostri()}
+        prima = self.istantanea()
         self.prova = ((hex_rgb(self.taratura[self.taratura_scelto]), time.time() + TARATURA_S)
                       if self.taratura_scelto in self.taratura else None)
-        self.applica_loco(self.destinazione(), prima)
+        self.applica_loco(prima)
 
     def tara(self, cosa: str, testo: str) -> None:
         if cosa == "colore/set" and (testo == NESSUNO or testo in self.taratura):
@@ -638,19 +766,37 @@ class Centro:
     def numero(self, mac: str) -> int:
         return (self.trova(mac) or {}).get("numero", 0)
 
+    def tipo(self, mac: str) -> str:
+        return (self.trova(mac) or {}).get("tipo") or "dualsense"
+
+    def ogg(self, mac: str) -> str:
+        return oggetto(mac, self.tipo(mac))
+
     def voluto(self, mac: str) -> dict:
         c = self.trova(mac) or {}
         return {"luce": c.get("luce") or {"acceso": True, "colore": AZZURRO, "luminosita": 255},
                 "giocatore": c.get("giocatore", c.get("numero", 1)), "led_microfono": bool(c.get("led_microfono")),
                 "grilletto_sx": c.get("grilletto_sx", "libero"), "grilletto_dx": c.get("grilletto_dx", "libero"),
-                "riposo": c.get("riposo", RIPOSO_DI_BASE), **self.loco_vuole()}
+                "riposo": c.get("riposo", RIPOSO_DI_BASE), **self.loco_vuole(c.get("numero", 1))}
 
-    def loco_vuole(self) -> dict:
+    def mano_loco(self, numero: int = 1) -> dict:
+        """Quello che LOCO dice di quel controller (27 nov, ADR 0224: «ognuno controlla il suo»): `mani[numero]`, se no
+        `predefinito` (un controller che LOCO non ha ancora visto), se no lo stato intero (LOCO di prima). {} se tace"""
+        d = self.da_loco
+        if not d or time.time() - self.da_loco_t > DA_LOCO_SCADE_S:
+            return {}
+        m = (d.get("mani") or {}).get(str(numero)) if isinstance(d.get("mani"), dict) else None
+        if isinstance(m, dict):
+            return m
+        return d.get("predefinito") if isinstance(d.get("predefinito"), dict) else d
+
+    def loco_vuole(self, numero: int = 1) -> dict:
         """Luce, LED del giocatore e del microfono decisi da LOCO (ADR 0221), finché LOCO si fa sentire; sopra, il
         colore da provare (`loco/controller/prova`, per tarare i colori guardando il controller)"""
         v = {}
-        if self.da_loco and time.time() - self.da_loco_t <= DA_LOCO_SCADE_S:
-            v = luce_da_loco(self.da_loco.get("controller") or {}) or {}
+        m = self.mano_loco(numero)
+        if m:
+            v = luce_da_loco(m.get("controller") or {}) or {}
         if self.prova and time.time() < self.prova[1]:
             v = {**v, "luce": {"acceso": True, "colore": self.prova[0], "luminosita": 255}}
         return v
@@ -663,7 +809,7 @@ class Centro:
             return
         if not isinstance(d, dict):
             return
-        prima = {c["mac"]: self.voluto(c["mac"]) for c in self.nostri()}
+        prima = self.istantanea()
         luce = d.get("luce")
         if isinstance(luce, list) and len(luce) == 3 and all(isinstance(x, int) for x in luce):
             sec = d.get("secondi", 60)
@@ -672,22 +818,36 @@ class Centro:
             scrivi(f"prova colore {self.prova[0]} per {sec:.0f} s")
         else:
             self.prova = None
-        self.applica_loco(self.destinazione(), prima)
+        self.applica_loco(prima)
 
-    def destinazione(self) -> str:
-        if not self.da_loco or time.time() - self.da_loco_t > DA_LOCO_SCADE_S:
-            return "appletv"
-        d = self.da_loco.get("destinazione")
+    def destinazione(self, numero: int = 1) -> str:
+        d = self.mano_loco(numero).get("destinazione")
         return d if d in ("appletv", "loco", "telecamere", "windows") else "appletv"
 
-    def schermo(self) -> str:
+    def schermo(self, numero: int = 1) -> str:
         """Lo schermo che il controller comanda quando la destinazione è LOCO o le telecamere, se no niente"""
-        s = self.da_loco.get("schermo") if self.destinazione() in ("loco", "telecamere") else None
+        s = self.mano_loco(numero).get("schermo") if self.destinazione(numero) in ("loco", "telecamere") else None
         return s if isinstance(s, str) and len(s) <= 40 else ""
 
-    def pubblica_destinazione(self) -> None:
-        self.pubblica(f"{BASE}/destinazione", self.destinazione(), True)
-        self.pubblica(f"{BASE}/destinazione/attributi", json.dumps({"schermo": self.schermo()}), True)
+    def istantanea(self) -> dict:
+        """Dove va e cosa vuole ognuno adesso: per mandare solo quello che cambia"""
+        return {"dove": {c["mac"]: (self.destinazione(c.get("numero", 1)), self.schermo(c.get("numero", 1)))
+                         for c in self.nostri()},
+                "dove_1": (self.destinazione(1), self.schermo(1)),
+                "voluto": {c["mac"]: self.voluto(c["mac"]) for c in self.nostri()}}
+
+    def pubblica_destinazione(self, mac: str | None = None) -> None:
+        """Quella di ognuno (`sensor.<controller>_destinazione`) e quella generale del controller 1, che resta per chi la
+        guarda già (`sensor.loco_controller_destinazione`)"""
+        if mac is None:
+            self.pubblica(f"{BASE}/destinazione", self.destinazione(1), True)
+            self.pubblica(f"{BASE}/destinazione/attributi", json.dumps({"schermo": self.schermo(1)}), True)
+        for c in self.nostri():
+            if mac is not None and c["mac"] != mac:
+                continue
+            n, o = c.get("numero", 1), self.ogg(c["mac"])
+            self.pubblica(f"{BASE}/{o}/destinazione", self.destinazione(n), True)
+            self.pubblica(f"{BASE}/{o}/destinazione/attributi", json.dumps({"schermo": self.schermo(n)}), True)
 
     def dice_loco(self, testo: str) -> None:
         """Lo stato che manda LOCO (il ponte loco-controller): si applica solo quello che cambia"""
@@ -697,27 +857,32 @@ class Centro:
             return
         if not isinstance(d, dict):
             return
-        prima_dest, prima = self.destinazione(), {c["mac"]: self.voluto(c["mac"]) for c in self.nostri()}
-        prima_sch = self.schermo()
-        vb = d.get("vibra") if isinstance(d.get("vibra"), dict) else None
-        if vb and vb.get("id") != (self.da_loco.get("vibra") or {}).get("id") and self.da_loco:
-            for s in list(self.sessioni.values()):        # una volta per ogni richiesta nuova (lo stato si ripete ogni 2 s)
-                if vb.get("forte"):
-                    s.vibra(True)                         # il comando segreto riuscito
-                else:
-                    s.vibra_piano(int(vb.get("ms") or 200))
+        prima = self.istantanea()
+        vecchio = {c["mac"]: (self.mano_loco(c.get("numero", 1)).get("vibra") or {}) for c in self.nostri()}
+        c_vivo = bool(self.da_loco)
         self.da_loco, self.da_loco_t = d, time.time()
-        if self.schermo() != prima_sch and self.destinazione() == prima_dest:
-            self.pubblica_destinazione()                  # stessa destinazione, schermo diverso (TV ↔ Nest)
-        self.applica_loco(prima_dest, prima)
+        for c in self.nostri():                           # il ronzio: solo al controller a cui l'ha chiesto LOCO
+            vb = self.mano_loco(c.get("numero", 1)).get("vibra")
+            s = self.sessioni.get(c["mac"])
+            if not isinstance(vb, dict) or not s or not c_vivo or vb.get("id") == vecchio[c["mac"]].get("id"):
+                continue                                  # una volta per ogni richiesta nuova (lo stato si ripete ogni 2 s)
+            if vb.get("forte"):
+                s.vibra(True)                             # il comando segreto riuscito
+            else:
+                s.vibra_piano(int(vb.get("ms") or 200))
+        self.applica_loco(prima)
 
-    def applica_loco(self, prima_dest: str, prima: dict) -> None:
-        dest = self.destinazione()
-        if dest != prima_dest:
+    def applica_loco(self, prima: dict) -> None:
+        if (self.destinazione(1), self.schermo(1)) != prima.get("dove_1"):
             self.pubblica_destinazione()
-            scrivi(f"destinazione: {dest}")
+            scrivi(f"destinazione: {self.destinazione(1)}")
         for c in self.nostri():
-            if self.voluto(c["mac"]) != prima.get(c["mac"]):
+            n = c.get("numero", 1)
+            if (self.destinazione(n), self.schermo(n)) != (prima.get("dove") or {}).get(c["mac"]):
+                self.pubblica_destinazione(c["mac"])
+                scrivi(f"{nome_di(c)}: {self.destinazione(n)}")
+        for c in self.nostri():
+            if self.voluto(c["mac"]) != (prima.get("voluto") or {}).get(c["mac"]):
                 self.pubblica_voluto(c["mac"])
                 sess = self.sessioni.get(c["mac"])
                 if sess:
@@ -737,7 +902,7 @@ class Centro:
                 if sess:
                     sess.manda()
         if self.da_loco and time.time() - self.da_loco_t > DA_LOCO_SCADE_S:
-            prima = {c["mac"]: luce_da_loco(self.da_loco.get("controller") or {}) for c in self.nostri()}
+            prima = {c["mac"]: True for c in self.nostri()}
             self.da_loco = {}
             scrivi("LOCO tace da 30 s: luce e LED come in HA, il controller all'Apple TV")
             self.pubblica_destinazione()
@@ -790,16 +955,17 @@ class Centro:
         self.pubblica(f"{BASE}/stato", testo[:250], True)
 
     def annuncia(self, c: dict) -> None:
-        for topic, conf in configurazioni(c["mac"], c["numero"]):
+        for topic, conf in configurazioni(c["mac"], c["numero"], c.get("tipo") or "dualsense"):
             self.pubblica(topic, json.dumps(conf), True)
-        o = oggetto(c["mac"])
+        o = self.ogg(c["mac"])
         if c["mac"] not in self.sessioni:
             self.pubblica(f"{BASE}/{o}/collegato", "no", True)
             self.pubblica(f"{BASE}/{o}/vivo", "offline", True)
         self.pubblica_voluto(c["mac"])
+        self.pubblica_destinazione(c["mac"])
 
     def pubblica_voluto(self, mac: str) -> None:
-        o, v = oggetto(mac), self.voluto(mac)
+        o, v = self.ogg(mac), self.voluto(mac)
         luce = v["luce"]
         r, g, b = luce.get("colore", AZZURRO)
         self.pubblica(f"{BASE}/{o}/luce", json.dumps({"state": "ON" if luce.get("acceso", True) else "OFF",
@@ -835,7 +1001,7 @@ class Centro:
             return
         if len(parti) < 4 or parti[2] == "vivo":
             return
-        c = next((x for x in self.nostri() if oggetto(x["mac"]) == parti[2]), None)
+        c = next((x for x in self.nostri() if self.ogg(x["mac"]) == parti[2]), None)
         if c is None:
             return
         cosa, sess = parti[3], self.sessioni.get(c["mac"])
@@ -914,7 +1080,7 @@ class Centro:
         scrivi(f"Bluetooth: {self.scheda}")
         for c in self.nostri():
             i = self.info(self.dev_path(c["mac"]))
-            scrivi(f"DualSense {c['numero']} ({c['mac']}): " + (
+            scrivi(f"{nome_di(c)} ({c['mac']}): " + (
                 f"Paired={bool(i.get('Paired'))} Bonded={bool(i.get('Bonded'))} Trusted={bool(i.get('Trusted'))}"
                 if i else "BlueZ non lo conosce più: va riabbinato"))
 
@@ -949,7 +1115,7 @@ class Centro:
         if time.time() > self.abbina_fino:
             return False
         i = self.info(dev_path)
-        return ds.e_un_dualsense(str(i.get("Name", "")), str(i.get("Modalias", "")))
+        return tipo_da(str(i.get("Name", "")), str(i.get("Modalias", ""))) is not None
 
     def abbina(self) -> None:
         if time.time() < self.abbina_fino:
@@ -962,7 +1128,8 @@ class Centro:
         cercando = False
         try:
             pr.Set("org.bluez.Adapter1", "Pairable", dbus.Boolean(True))   # se no non resta abbinato (bondable)
-            self.stato("cerco un DualSense: tieni premuti Create e PS finché lampeggia")
+            self.stato("cerco un controller: DualSense con Create e PS tenuti finché lampeggia, quello per Switch col "
+                       "tasto di abbinamento")
             ad.SetDiscoveryFilter({"Transport": "bredr"})
             ad.StartDiscovery()
             cercando = True
@@ -970,7 +1137,7 @@ class Centro:
             ad.StopDiscovery()
             cercando = False
             if not mac:
-                self.stato("nessun DualSense in abbinamento trovato")
+                self.stato("nessun controller in abbinamento trovato")
                 return
             self.stato(f"trovato {mac}, mi abbino")
             if bool(self.info(self.dev_path(mac)).get("Paired")):
@@ -989,21 +1156,23 @@ class Centro:
             scrivi(f"{mac}: Paired={bool(i.get('Paired'))} Bonded={bool(i.get('Bonded'))} "
                    f"Trusted={bool(i.get('Trusted'))} (senza Bonded alla riaccensione non si ricollega)")
             c = self.trova(mac)
+            tipo = tipo_da(str(i.get("Name", "")), str(i.get("Modalias", ""))) or "dualsense"
             if c is None:
                 numeri = {x["numero"] for x in self.nostri()}
-                c = {"mac": mac, "numero": next(n for n in range(1, 10) if n not in numeri)}
+                c = {"mac": mac, "numero": next(n for n in range(1, 10) if n not in numeri), "tipo": tipo}
                 c["giocatore"] = min(c["numero"], 5)
                 self.nostri().append(c)
                 self.salva()
+            scrivi(f"{mac}: {tipo} ({i.get('Name')}, {i.get('Modalias')})")
             self.annuncia(c)
             for _ in range(200):                          # dopo l'abbinamento si collega lui (bluetoothd lo accoglie)
                 if mac in self.sessioni:
                     break
                 time.sleep(0.1)
             if mac in self.sessioni:
-                self.stato(f"DualSense {c['numero']} abbinato e collegato")
+                self.stato(f"{nome_di(c)} abbinato e collegato")
             else:
-                self.stato(f"DualSense {c['numero']} abbinato: premi PS per collegarlo")
+                self.stato(f"{nome_di(c)} abbinato: premi PS (o Home) per collegarlo")
         except Exception as e:  # noqa: BLE001
             self.stato(f"abbinamento non riuscito: {e}")
         finally:
@@ -1029,7 +1198,7 @@ class Centro:
                     continue
                 mac = str(d.get("Address", "")).upper()
                 if MAC.match(mac) and d.get("RSSI") is not None and mac not in self.sessioni \
-                        and ds.e_un_dualsense(str(d.get("Name", "")), str(d.get("Modalias", ""))):
+                        and tipo_da(str(d.get("Name", "")), str(d.get("Modalias", ""))):
                     return mac                            # visto adesso nella ricerca: è lui in abbinamento
             time.sleep(1)
         return None
@@ -1051,18 +1220,18 @@ class Centro:
             return
         i = self.info(self.dev_path(mac))
         self.spegni(mac)
-        if i and ds.e_un_dualsense(str(i.get("Name", "")), str(i.get("Modalias", ""))):
+        if i and tipo_da(str(i.get("Name", "")), str(i.get("Modalias", ""))):
             try:
                 import dbus
                 dbus.Interface(self.bus.get_object("org.bluez", self.scheda), "org.bluez.Adapter1").RemoveDevice(
                     self.dev_path(mac))
             except Exception as e:  # noqa: BLE001
                 scrivi(f"{mac} non tolto dal Bluetooth: {e}")
-        for topic, _c in configurazioni(mac, c["numero"]):
+        for topic, _c in configurazioni(mac, c["numero"], c.get("tipo") or "dualsense"):
             self.pubblica(topic, "", True)                 # le entità spariscono da HA
         self.cfg["controller"] = [x for x in self.nostri() if x["mac"] != mac]
         self.salva()
-        self.stato(f"DualSense {c['numero']} dimenticato")
+        self.stato(f"{nome_di(c)} dimenticato")
 
     # il controller collegato = il suo hidraw
     def sorveglia(self) -> None:
@@ -1088,7 +1257,7 @@ class Centro:
                         if time.time() - da > 15 and (mac, "hidraw") not in detto:
                             detto.add((mac, "hidraw"))
                             uhid = "c'è" if os.path.exists("/dev/uhid") else "manca"
-                            self.stato(f"DualSense {c['numero']} collegato al Bluetooth ma il sistema non lo presenta "
+                            self.stato(f"{nome_di(c)} collegato al Bluetooth ma il sistema non lo presenta "
                                        f"(nessun hidraw; uhid {uhid})")
                             for d in sorted(HIDRAW.glob("hidraw*")):
                                 try:
@@ -1106,7 +1275,7 @@ class Centro:
                         detto.add((mac, "permesso"))
                         scrivi(f"{mac}: {percorso} c'è ma non si apre ancora ({e}), riprovo")
                     continue
-                sess = Sessione(self, mac, fd, percorso)
+                sess = (SessioneSwitch if c.get("tipo") == "switch" else Sessione)(self, mac, fd, percorso)
                 with self.lock:
                     self.sessioni[mac] = sess
                 scrivi(f"{mac} collegato ({percorso})")
@@ -1118,8 +1287,8 @@ class Centro:
             if self.sessioni.get(mac) is not sess:
                 return                                    # se n'è già aperta un'altra: quella vale
             del self.sessioni[mac]
-        o = oggetto(mac)
-        for k in ds.TUTTI_I_TASTI:                        # staccato con un tasto giù: non resta «premuto» in HA
+        o = self.ogg(mac)
+        for k in tasti_di(self.tipo(mac)):                # staccato con un tasto giù: non resta «premuto» in HA
             self.pubblica(f"{BASE}/{o}/tasto/{k}", "no", True)
         self.pubblica(f"{BASE}/{o}/collegato", "no", True)
         self.pubblica(f"{BASE}/{o}/vivo", "offline", True)
